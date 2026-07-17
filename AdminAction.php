@@ -12,6 +12,7 @@ class Fediverse_AdminAction extends Typecho_Widget implements Widget_Interface_D
     {
         Fediverse_Core::helperCall('security')->protect();
         Typecho_Widget::widget('Widget_User')->pass('administrator');
+        Fediverse_Database::install();
 
         $do = (string)$this->request->get('do', '');
         try {
@@ -45,8 +46,52 @@ class Fediverse_AdminAction extends Typecho_Widget implements Widget_Interface_D
                     $this->notice(_t('作者联邦身份检查完成，新生成 %d 个身份。', $count), 'success');
                     break;
                 case 'prune-activities':
-                    $count = Fediverse_ActivityPub::pruneLogs();
-                    $this->notice(_t('已清理 %d 条过期入站活动记录。', $count), 'success');
+                    $activities = Fediverse_ActivityPub::pruneLogs();
+                    $timeline = Fediverse_Client::pruneTimeline();
+                    $this->notice(_t('已清理 %d 条入站活动和 %d 条时间轴内容。', $activities, $timeline), 'success');
+                    break;
+                case 'follow-remote':
+                    $result = Fediverse_Client::follow(
+                        (int)$this->request->get('uid', 0),
+                        (string)$this->request->get('account', '')
+                    );
+                    if ($result['created']) {
+                        $this->notice(_t('关注请求已加入队列，等待远端确认。'), 'success');
+                    } else {
+                        $this->notice(
+                            $result['state'] === 'accepted' ? _t('已经关注此账号。') : _t('关注请求仍在等待远端确认。'),
+                            'notice'
+                        );
+                    }
+                    break;
+                case 'unfollow-remote':
+                    $count = Fediverse_Client::unfollow((int)$this->request->get('id', 0));
+                    $this->notice(_t('已取消 %d 个远端关注。', $count), 'success');
+                    break;
+                case 'timeline-like':
+                case 'timeline-unlike':
+                    $active = Fediverse_Client::toggleInteraction(
+                        (int)$this->request->get('tid', 0),
+                        'Like',
+                        $do === 'timeline-unlike'
+                    );
+                    $this->notice($active ? _t('点赞已加入投递队列。') : _t('取消点赞已加入投递队列。'), 'success');
+                    break;
+                case 'timeline-announce':
+                case 'timeline-unannounce':
+                    $active = Fediverse_Client::toggleInteraction(
+                        (int)$this->request->get('tid', 0),
+                        'Announce',
+                        $do === 'timeline-unannounce'
+                    );
+                    $this->notice($active ? _t('转发已加入投递队列。') : _t('取消转发已加入投递队列。'), 'success');
+                    break;
+                case 'timeline-reply':
+                    Fediverse_Client::reply(
+                        (int)$this->request->get('tid', 0),
+                        (string)$this->request->get('content', '')
+                    );
+                    $this->notice(_t('回复已加入投递队列。'), 'success');
                     break;
                 default:
                     $this->notice(_t('未知的联邦管理操作。'), 'error');
@@ -55,7 +100,7 @@ class Fediverse_AdminAction extends Typecho_Widget implements Widget_Interface_D
             $this->notice(_t('操作失败：%s', $e->getMessage()), 'error');
         }
 
-        $views = array('overview', 'queue', 'followers', 'activities');
+        $views = array('overview', 'queue', 'followers', 'following', 'timeline', 'activities');
         $view = (string)$this->request->get('view', 'overview');
         $query = 'extending.php?panel=Fediverse%2Fmanage.php';
         if (in_array($view, $views, true) && $view !== 'overview') {

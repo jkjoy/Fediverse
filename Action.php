@@ -45,11 +45,30 @@ class Fediverse_Action extends Typecho_Widget
         $this->respond(Fediverse_ActivityPub::followers($user), 'application/activity+json');
     }
 
+    public function following()
+    {
+        $user = Fediverse_Core::userByUsername($this->request->get('username', ''));
+        if (!$user || !Fediverse_Core::isEnabled()) {
+            $this->error(404, 'Actor not found');
+        }
+        $this->respond(Fediverse_ActivityPub::following($user), 'application/activity+json');
+    }
+
     public function object()
     {
         $note = Fediverse_ActivityPub::noteForPost((int)$this->request->get('cid', 0));
         if (!$note || !Fediverse_Core::isEnabled()) {
             $this->error(404, 'Object not found');
+        }
+        $note = array('@context' => Fediverse_ActivityPub::CONTEXT) + $note;
+        $this->respond($note, 'application/activity+json');
+    }
+
+    public function reply()
+    {
+        $note = Fediverse_Client::replyObject((string)$this->request->get('token', ''));
+        if (!$note || !Fediverse_Core::isEnabled()) {
+            $this->error(404, 'Reply not found');
         }
         $note = array('@context' => Fediverse_ActivityPub::CONTEXT) + $note;
         $this->respond($note, 'application/activity+json');
@@ -107,6 +126,7 @@ class Fediverse_Action extends Typecho_Widget
         }
         $result = Fediverse_Queue::run();
         $result['prunedActivities'] = Fediverse_ActivityPub::pruneLogs();
+        $result['prunedTimeline'] = Fediverse_Client::pruneTimeline();
         $this->respond($result, 'application/json');
     }
 

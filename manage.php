@@ -6,6 +6,12 @@ if (!defined('__TYPECHO_ADMIN__')) {
 
 require_once __DIR__ . '/bootstrap.php';
 
+if (class_exists('Fediverse_Plugin')) {
+    Fediverse_Plugin::upgrade();
+} else {
+    Fediverse_Database::install();
+}
+
 $db = Typecho_Db::get();
 $e = static function ($value) {
     return htmlspecialchars((string)$value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
@@ -27,6 +33,8 @@ $actorsTable = Fediverse_Database::table('actors');
 $followersTable = Fediverse_Database::table('followers');
 $queueTable = Fediverse_Database::table('queue');
 $activitiesTable = Fediverse_Database::table('activities');
+$followingsTable = Fediverse_Database::table('followings');
+$timelineTable = Fediverse_Database::table('timeline');
 
 $users = $db->fetchAll($db->select('uid', 'name', 'screenName')->from('table.users')->order('uid', Typecho_Db::SORT_ASC));
 $actors = $db->fetchAll($db->select()->from($actorsTable));
@@ -42,12 +50,13 @@ foreach ($users as $localUser) {
 $stats = array(
     'authors' => count($actors),
     'followers' => $count($followersTable, 'state = ?', 'accepted'),
+    'following' => $count($followingsTable, 'state = ?', 'accepted'),
     'queued' => $count($queueTable),
     'failed' => $count($queueTable, 'attempts >= ?', 8),
     'inbound' => $count($activitiesTable)
 );
 
-$views = array('overview', 'queue', 'followers', 'activities');
+$views = array('overview', 'queue', 'followers', 'following', 'timeline', 'activities');
 $view = (string)$request->get('view', 'overview');
 if (!in_array($view, $views, true)) {
     $view = 'overview';
@@ -66,6 +75,8 @@ $actionUrl = static function ($query, $returnView = null) use ($security, $view)
 $activityTypeLabel = static function ($type) {
     $labels = array(
         'Follow' => _t('关注'),
+        'Accept' => _t('接受关注'),
+        'Reject' => _t('拒绝关注'),
         'Create' => _t('回复'),
         'Update' => _t('编辑回复'),
         'Delete' => _t('删除回复'),
@@ -84,9 +95,18 @@ $activityStatus = static function ($status) {
         'accepted' => array(_t('已接收'), '', 0),
         'ignored' => array(_t('已忽略'), 'warn', 0),
         'undone' => array(_t('已撤销'), 'muted', 0),
-        'deleted' => array(_t('已删除'), 'muted', 0)
+        'deleted' => array(_t('已删除'), 'muted', 0),
+        'rejected' => array(_t('已拒绝'), 'error', 0),
+        'timeline' => array(_t('已进入时间轴'), '', 0)
     );
     return $labels[$status] ?? array($status, 'warn', 0);
+};
+$actorLabel = static function ($actor) {
+    $actor = (string)$actor;
+    $host = (string)parse_url($actor, PHP_URL_HOST);
+    $path = trim((string)parse_url($actor, PHP_URL_PATH), '/');
+    $username = $path !== '' ? rawurldecode((string)basename($path)) : '';
+    return $username !== '' && $host !== '' ? '@' . $username . '@' . $host : ($host ?: $actor);
 };
 
 include 'header.php';
@@ -95,7 +115,7 @@ include 'menu.php';
 
 <style>
 html{-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
-.fed-status{display:grid;grid-template-columns:repeat(5,minmax(110px,1fr));margin:16px 0 18px;border-top:1px solid #d9d9d6;border-bottom:1px solid #d9d9d6;background:#fafafa}
+.fed-status{display:grid;grid-template-columns:repeat(6,minmax(100px,1fr));margin:16px 0 18px;border-top:1px solid #d9d9d6;border-bottom:1px solid #d9d9d6;background:#fafafa}
 .fed-stat{padding:13px 14px;border-right:1px solid #e5e5e2}
 .fed-stat:last-child{border-right:0}
 .fed-stat strong{display:block;font-size:22px;line-height:1.2;color:#262626;font-variant-numeric:tabular-nums}
@@ -118,17 +138,40 @@ html{-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
 .fed-state.error{background:#fff0ee;color:#a33226}
 .fed-state.muted{background:#f0f0ee;color:#666}
 .fed-muted{color:#888}
+.fed-follow-form{display:grid;grid-template-columns:minmax(160px,220px) minmax(260px,1fr) auto;gap:10px;align-items:end;margin:16px 0 20px;padding:14px 0;border-top:1px solid #eee;border-bottom:1px solid #eee}
+.fed-field label{display:block;margin-bottom:5px;color:#555;font-size:12px;font-weight:600}
+.fed-field input,.fed-field select{width:100%;min-height:40px;box-sizing:border-box}
+.fed-follow-form .btn{min-height:40px;box-sizing:border-box}
+.fed-feed{border-top:1px solid #e5e5e2}
+.fed-feed-item{padding:17px 0;border-bottom:1px solid #e5e5e2}
+.fed-feed-head{display:flex;align-items:flex-start;gap:12px}
+.fed-feed-identity{min-width:0;flex:1}
+.fed-feed-identity strong,.fed-feed-identity a{overflow-wrap:anywhere}
+.fed-feed-time{flex:0 0 auto;color:#888;font-size:12px;font-variant-numeric:tabular-nums}
+.fed-feed-content{margin:10px 0;color:#333;font-size:14px;line-height:1.75;white-space:normal;overflow-wrap:anywhere}
+.fed-feed-actions{display:flex;align-items:center;gap:14px;min-height:40px;flex-wrap:wrap}
+.fed-feed-actions>a,.fed-reply summary{display:inline-flex;align-items:center;min-height:40px;color:#467b96;cursor:pointer}
+.fed-feed-actions .is-active{color:#8a3f64;font-weight:600}
+.fed-reply[open]{order:2;flex:1 0 100%}
+.fed-reply summary{list-style:none}
+.fed-reply summary::-webkit-details-marker{display:none}
+.fed-reply form{max-width:520px;margin:4px 0 8px}
+.fed-reply textarea{display:block;width:100%;min-height:84px;padding:8px;box-sizing:border-box;resize:vertical}
+.fed-reply .btn{min-height:40px;margin-top:8px}
+.fed-empty{padding:34px 0;text-align:center;color:#777}
+.fed-empty strong{display:block;margin-bottom:5px;color:#444;font-size:15px}
+.fed-sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
 .fed-table-actions{white-space:nowrap}
 .fed-table-actions a{display:inline-flex;align-items:center;min-height:40px}
 .fed-table-actions a+a{margin-left:8px}
-.fed-tabs{margin-bottom:0}
+.fed-tabs{margin-bottom:0;overflow-x:auto;white-space:nowrap}
 .fed-tabs a{display:inline-flex;align-items:center;min-height:40px;box-sizing:border-box}
 .fed-status,.typecho-list-table{font-variant-numeric:tabular-nums}
 .typecho-table-wrap{overflow-x:auto}
-.fed-actions a:focus-visible,.fed-tabs a:focus-visible,.fed-table-actions a:focus-visible,.fed-copy:focus-visible{outline:2px solid #467b96;outline-offset:2px}
+.fed-actions a:focus-visible,.fed-tabs a:focus-visible,.fed-table-actions a:focus-visible,.fed-copy:focus-visible,.fed-feed-actions a:focus-visible,.fed-reply summary:focus-visible{outline:2px solid #467b96;outline-offset:2px}
 .fed-live{position:fixed;right:20px;bottom:20px;z-index:1000;padding:9px 12px;border-radius:4px;background:#262626;color:#fff;box-shadow:0 4px 14px rgba(0,0,0,.18)}
 .fed-live[hidden]{display:none}
-@media(max-width:760px){.fed-status{grid-template-columns:repeat(2,minmax(0,1fr))}.fed-stat{border-bottom:1px solid #e5e5e2}.fed-endpoint{grid-template-columns:1fr;gap:0}.typecho-list-table{min-width:760px}}
+@media(max-width:760px){.fed-status{grid-template-columns:repeat(2,minmax(0,1fr))}.fed-stat{border-bottom:1px solid #e5e5e2}.fed-endpoint{grid-template-columns:1fr;gap:0}.typecho-list-table{min-width:760px}.fed-follow-form{grid-template-columns:1fr;align-items:stretch}.fed-feed-head{flex-direction:column;gap:3px}.fed-feed-time{order:2}}
 </style>
 
 <div class="main">
@@ -139,6 +182,7 @@ html{-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
                 <div class="fed-status" aria-label="联邦状态统计">
                     <div class="fed-stat"><strong><?php echo $stats['authors']; ?></strong><span><?php _e('已生成身份'); ?></span></div>
                     <div class="fed-stat"><strong><?php echo $stats['followers']; ?></strong><span><?php _e('关注者'); ?></span></div>
+                    <div class="fed-stat"><strong><?php echo $stats['following']; ?></strong><span><?php _e('正在关注'); ?></span></div>
                     <div class="fed-stat"><strong><?php echo $stats['queued']; ?></strong><span><?php _e('投递任务'); ?></span></div>
                     <div class="fed-stat<?php if ($stats['failed'] > 0): ?> is-error<?php endif; ?>"><strong><?php echo $stats['failed']; ?></strong><span><?php _e('失败任务'); ?></span></div>
                     <div class="fed-stat"><strong><?php echo $stats['inbound']; ?></strong><span><?php _e('入站活动'); ?></span></div>
@@ -147,7 +191,7 @@ html{-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
                 <div class="fed-actions">
                     <a class="btn btn-s primary fed-action" data-busy="<?php _e('正在处理…'); ?>" href="<?php echo $e($actionUrl('do=run-queue', 'queue')); ?>"><?php _e('立即处理队列'); ?></a>
                     <a class="btn btn-s fed-action" data-busy="<?php _e('正在生成…'); ?>" href="<?php echo $e($actionUrl('do=provision-actors', 'overview')); ?>"><?php _e('生成作者身份'); ?></a>
-                    <a class="btn btn-s fed-action operate-delete" data-busy="<?php _e('正在清理…'); ?>" data-confirm="<?php _e('确认清理超过保留天数的入站活动吗？'); ?>" href="<?php echo $e($actionUrl('do=prune-activities', 'activities')); ?>"><?php _e('清理过期活动'); ?></a>
+                    <a class="btn btn-s fed-action operate-delete" data-busy="<?php _e('正在清理…'); ?>" data-confirm="<?php _e('确认清理超过保留天数的入站活动和时间轴内容吗？'); ?>" href="<?php echo $e($actionUrl('do=prune-activities', 'activities')); ?>"><?php _e('清理过期内容'); ?></a>
                     <span class="fed-spacer"></span>
                     <a href="<?php echo $e(Typecho_Common::url('options-plugin.php?config=Fediverse', $options->adminUrl)); ?>"><?php _e('插件设置'); ?></a>
                 </div>
@@ -156,6 +200,8 @@ html{-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
                     <li<?php if ($view === 'overview'): ?> class="current"<?php endif; ?>><a href="<?php echo $e($panelUrl('overview')); ?>"><?php _e('作者账号'); ?></a></li>
                     <li<?php if ($view === 'queue'): ?> class="current"<?php endif; ?>><a href="<?php echo $e($panelUrl('queue')); ?>"><?php _e('投递队列'); ?></a></li>
                     <li<?php if ($view === 'followers'): ?> class="current"<?php endif; ?>><a href="<?php echo $e($panelUrl('followers')); ?>"><?php _e('关注者'); ?></a></li>
+                    <li<?php if ($view === 'following'): ?> class="current"<?php endif; ?>><a href="<?php echo $e($panelUrl('following')); ?>"><?php _e('正在关注'); ?></a></li>
+                    <li<?php if ($view === 'timeline'): ?> class="current"<?php endif; ?>><a href="<?php echo $e($panelUrl('timeline')); ?>"><?php _e('时间轴'); ?></a></li>
                     <li<?php if ($view === 'activities'): ?> class="current"<?php endif; ?>><a href="<?php echo $e($panelUrl('activities')); ?>"><?php _e('入站活动'); ?></a></li>
                 </ul>
 
@@ -243,6 +289,79 @@ html{-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
                             </tbody>
                         </table>
                     </div>
+                <?php elseif ($view === 'following'): ?>
+                    <?php $rows = $db->fetchAll($db->select()->from($followingsTable)->order('id', Typecho_Db::SORT_DESC)->limit(100)); ?>
+                    <form class="fed-follow-form" method="post" action="<?php echo $e($actionUrl('do=follow-remote', 'following')); ?>">
+                        <div class="fed-field">
+                            <label for="fed-follow-uid"><?php _e('使用作者身份'); ?></label>
+                            <select id="fed-follow-uid" name="uid" required>
+                                <?php foreach ($users as $localUser): ?>
+                                    <?php if (Fediverse_Core::userEnabled((int)$localUser['uid'])): ?>
+                                        <option value="<?php echo (int)$localUser['uid']; ?>"><?php echo $e($localUser['screenName'] ?: $localUser['name']); ?> · @<?php echo $e(Fediverse_Core::usernameForUser($localUser)); ?></option>
+                                    <?php endif; ?>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+                        <div class="fed-field">
+                            <label for="fed-follow-account"><?php _e('远端联邦账号'); ?></label>
+                            <input id="fed-follow-account" name="account" type="text" maxlength="512" placeholder="@user@example.com" autocomplete="off" spellcheck="false" required>
+                        </div>
+                        <button class="btn btn-s primary fed-action" data-busy="<?php _e('正在查找…'); ?>" type="submit"><?php _e('关注'); ?></button>
+                    </form>
+                    <div class="typecho-table-wrap">
+                        <table class="typecho-list-table">
+                            <colgroup><col width="20%"><col width="42%"><col width="16%"><col width="14%"><col></colgroup>
+                            <thead><tr><th><?php _e('本地作者'); ?></th><th><?php _e('远端账号'); ?></th><th><?php _e('状态'); ?></th><th><?php _e('更新时间'); ?></th><th><?php _e('操作'); ?></th></tr></thead>
+                            <tbody>
+                            <?php foreach ($rows as $row): ?>
+                                <?php $owner = $userMap[(int)$row['uid']] ?? null; ?>
+                                <tr>
+                                    <td><?php echo $owner ? $e($owner['screenName'] ?: $owner['name']) : ('UID ' . (int)$row['uid']); ?></td>
+                                    <td class="fed-break"><strong><?php echo $e($actorLabel($row['actor'])); ?></strong><br><a href="<?php echo $e($row['actor']); ?>" target="_blank" rel="noopener noreferrer nofollow"><?php echo $e($row['actor']); ?></a></td>
+                                    <td><span class="fed-state <?php echo $row['state'] === 'accepted' ? '' : ($row['state'] === 'rejected' ? 'error' : 'warn'); ?>"><?php echo $row['state'] === 'accepted' ? _t('已关注') : ($row['state'] === 'rejected' ? _t('已拒绝') : _t('等待确认')); ?></span></td>
+                                    <td><?php echo $e($formatTime($row['updated'])); ?></td>
+                                    <td><a class="fed-action operate-delete" data-busy="<?php _e('取消中…'); ?>" data-confirm="<?php _e('确认取消关注此远端账号吗？'); ?>" href="<?php echo $e($actionUrl('do=unfollow-remote&id=' . (int)$row['id'], 'following')); ?>"><?php _e('取消关注'); ?></a></td>
+                                </tr>
+                            <?php endforeach; ?>
+                            <?php if (!$rows): ?><tr><td colspan="5"><?php _e('尚未关注远端账号，可在上方输入完整联邦地址。'); ?></td></tr><?php endif; ?>
+                            </tbody>
+                        </table>
+                    </div>
+                <?php elseif ($view === 'timeline'): ?>
+                    <?php $rows = $db->fetchAll($db->select()->from($timelineTable)->where('deleted = ?', 0)->order('published', Typecho_Db::SORT_DESC)->limit(50)); ?>
+                    <?php if ($rows): ?>
+                        <div class="fed-feed" aria-label="<?php _e('联邦时间轴'); ?>">
+                            <?php foreach ($rows as $row): ?>
+                                <?php $owner = $userMap[(int)$row['uid']] ?? null; ?>
+                                <article class="fed-feed-item">
+                                    <header class="fed-feed-head">
+                                        <div class="fed-feed-identity">
+                                            <strong><a href="<?php echo $e($row['actor']); ?>" target="_blank" rel="noopener noreferrer nofollow"><?php echo $e($actorLabel($row['actor'])); ?></a></strong>
+                                            <div class="fed-muted"><?php echo $owner ? $e(_t('投递给 %s', $owner['screenName'] ?: $owner['name'])) : ('UID ' . (int)$row['uid']); ?> · <?php echo $e($row['object_type']); ?></div>
+                                        </div>
+                                        <time class="fed-feed-time" datetime="<?php echo $e(Fediverse_Core::iso8601((int)$row['published'])); ?>"><?php echo $e($formatTime($row['published'])); ?></time>
+                                    </header>
+                                    <div class="fed-feed-content"><?php echo nl2br($e($row['content']), false); ?></div>
+                                    <div class="fed-feed-actions">
+                                        <a class="fed-action<?php if ($row['liked_activity']): ?> is-active<?php endif; ?>" data-busy="<?php _e('处理中…'); ?>" href="<?php echo $e($actionUrl('do=' . ($row['liked_activity'] ? 'timeline-unlike' : 'timeline-like') . '&tid=' . (int)$row['tid'], 'timeline')); ?>"><?php echo $row['liked_activity'] ? _t('取消点赞') : _t('点赞'); ?></a>
+                                        <a class="fed-action<?php if ($row['announced_activity']): ?> is-active<?php endif; ?>" data-busy="<?php _e('处理中…'); ?>" href="<?php echo $e($actionUrl('do=' . ($row['announced_activity'] ? 'timeline-unannounce' : 'timeline-announce') . '&tid=' . (int)$row['tid'], 'timeline')); ?>"><?php echo $row['announced_activity'] ? _t('取消转发') : _t('转发'); ?></a>
+                                        <details class="fed-reply">
+                                            <summary><?php _e('回复'); ?></summary>
+                                            <form method="post" action="<?php echo $e($actionUrl('do=timeline-reply', 'timeline')); ?>">
+                                                <input type="hidden" name="tid" value="<?php echo (int)$row['tid']; ?>">
+                                                <label class="fed-sr-only" for="fed-reply-<?php echo (int)$row['tid']; ?>"><?php _e('回复内容'); ?></label>
+                                                <textarea id="fed-reply-<?php echo (int)$row['tid']; ?>" name="content" maxlength="5000" required></textarea>
+                                                <button class="btn btn-s primary fed-action" data-busy="<?php _e('发送中…'); ?>" type="submit"><?php _e('发送回复'); ?></button>
+                                            </form>
+                                        </details>
+                                        <a href="<?php echo $e($row['url']); ?>" target="_blank" rel="noopener noreferrer nofollow"><?php _e('查看原文'); ?></a>
+                                    </div>
+                                </article>
+                            <?php endforeach; ?>
+                        </div>
+                    <?php else: ?>
+                        <div class="fed-empty"><strong><?php _e('时间轴还是空的'); ?></strong><span><?php _e('关注远端账号并等待对方接受后，新内容会由远端投递到这里。'); ?></span><br><a href="<?php echo $e($panelUrl('following')); ?>"><?php _e('添加关注'); ?></a></div>
+                    <?php endif; ?>
                 <?php else: ?>
                     <?php $rows = $db->fetchAll($db->select()->from($activitiesTable)->order('aid', Typecho_Db::SORT_DESC)->limit(100)); ?>
                     <div class="typecho-table-wrap">

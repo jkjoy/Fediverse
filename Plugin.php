@@ -13,7 +13,7 @@ require_once __DIR__ . '/AdminAction.php';
  *
  * @package Fediverse
  * @author Typecho Community
- * @version 0.3.0
+ * @version 0.4.0
  * @link https://www.w3.org/TR/activitypub/
  */
 class Fediverse_Plugin implements Typecho_Plugin_Interface
@@ -30,7 +30,9 @@ class Fediverse_Plugin implements Typecho_Plugin_Interface
         'fediverse_shared_inbox' => array('/fediverse/inbox', 'sharedInbox'),
         'fediverse_outbox' => array('/fediverse/author/[username:alpha]/outbox', 'outbox'),
         'fediverse_followers' => array('/fediverse/author/[username:alpha]/followers', 'followers'),
+        'fediverse_following' => array('/fediverse/author/[username:alpha]/following', 'following'),
         'fediverse_object' => array('/fediverse/post/[cid:digital]', 'object'),
+        'fediverse_reply' => array('/fediverse/reply/[token:alpha]', 'reply'),
         'fediverse_cron' => array('/fediverse/cron/[token:alpha]', 'cron')
     );
 
@@ -78,6 +80,22 @@ class Fediverse_Plugin implements Typecho_Plugin_Interface
         Fediverse_Core::helperCall('removeAction', self::ADMIN_ACTION);
 
         return _t('Fediverse 已停用，联邦数据表和作者密钥已保留。');
+    }
+
+    public static function upgrade()
+    {
+        Fediverse_Database::install();
+        $routingTable = Fediverse_Core::options()->routingTable;
+        $upgrades = array(
+            'fediverse_following' => 'fediverse_followers',
+            'fediverse_reply' => 'fediverse_object'
+        );
+        foreach ($upgrades as $name => $after) {
+            if (!isset($routingTable[$name])) {
+                $route = self::ROUTES[$name];
+                Fediverse_Core::helperCall('addRoute', $name, $route[0], 'Fediverse_Action', $route[1], $after);
+            }
+        }
     }
 
     public static function config(Typecho_Widget_Helper_Form $form)
@@ -129,8 +147,8 @@ class Fediverse_Plugin implements Typecho_Plugin_Interface
             'activityRetentionDays',
             null,
             '90',
-            _t('入站活动日志保留天数'),
-            _t('Cron 会自动删除超过此天数的入站活动记录，范围 7 至 3650 天。')
+            _t('入站活动与时间轴保留天数'),
+            _t('Cron 会自动删除超过此天数的入站活动和时间轴内容，范围 7 至 3650 天。')
         );
         $retention->addRule('isInteger', _t('必须是整数'));
         $form->addInput($retention);

@@ -34,6 +34,7 @@ class Fediverse_ActivityPub
             'inbox' => $id . '/inbox',
             'outbox' => $id . '/outbox',
             'followers' => $id . '/followers',
+            'following' => $id . '/following',
             'endpoints' => array('sharedInbox' => Fediverse_Core::url('fediverse/inbox')),
             'manuallyApprovesFollowers' => false,
             'discoverable' => true,
@@ -158,6 +159,21 @@ class Fediverse_ActivityPub
         );
     }
 
+    public static function following($user)
+    {
+        $db = Typecho_Db::get();
+        $actor = Fediverse_Core::ensureActor($user);
+        $rows = $db->fetchAll($db->select('actor')->from(Fediverse_Database::table('followings'))
+            ->where('uid = ?', (int)$user['uid'])->where('state = ?', 'accepted'));
+        return array(
+            '@context' => self::CONTEXT,
+            'id' => Fediverse_Core::actorUrl($actor['username']) . '/following',
+            'type' => 'Collection',
+            'totalItems' => count($rows),
+            'items' => array_values(array_column($rows, 'actor'))
+        );
+    }
+
     public static function receive($activity, $rawBody, $request, $targetUsername = null)
     {
         if (!is_array($activity) || empty($activity['id']) || empty($activity['type'])) {
@@ -174,29 +190,73 @@ class Fediverse_ActivityPub
             return array('duplicate' => true);
         }
 
+        $type = (string)$activity['type'];
         $user = $targetUsername !== null ? Fediverse_Core::userByUsername($targetUsername) : self::targetUser($activity);
+        $timelineUsers = in_array($type, array('Create', 'Update', 'Delete'), true)
+            ? Fediverse_Client::usersFollowing($actorId, in_array($type, array('Update', 'Delete'), true))
+            : array();
+        if (!$user && $timelineUsers) {
+            $user = $timelineUsers[0];
+        }
         if (!$user || !Fediverse_Core::userEnabled((int)$user['uid'])) {
             throw new InvalidArgumentException('Local inbox target was not found');
         }
+        $recipientUsers = array((int)$user['uid'] => $user);
+        foreach ($timelineUsers as $timelineUser) {
+            $recipientUsers[(int)$timelineUser['uid']] = $timelineUser;
+        }
         $status = 'accepted';
         $objectId = self::objectId($activity['object'] ?? null);
-        switch ((string)$activity['type']) {
+        switch ($type) {
             case 'Follow':
                 self::follow($activity, $user, $actorId);
+                break;
+            case 'Accept':
+                $status = Fediverse_Client::handleFollowResponse($activity, $user, $actorId, 'accepted')
+                    ? 'accepted'
+                    : 'ignored';
+                break;
+            case 'Reject':
+                $status = Fediverse_Client::handleFollowResponse($activity, $user, $actorId, 'rejected')
+                    ? 'rejected'
+                    : 'ignored';
                 break;
             case 'Undo':
                 self::undo($activity, $user, $actorId);
                 break;
             case 'Create':
-                $commentId = self::createReply($activity, $user, $actorId);
-                $status = $commentId ? 'comment:' . $commentId : 'ignored';
+                $commentId = 0;
+                $timelineId = 0;
+                foreach ($recipientUsers as $recipientUser) {
+                    $createdComment = self::createReply($activity, $recipientUser, $actorId);
+                    if ($createdComment) {
+                        $commentId = $createdComment;
+                    } else {
+                        $timelineId = Fediverse_Client::storeTimeline($activity, $recipientUser, $actorId) ?: $timelineId;
+                    }
+                }
+                $status = $commentId ? 'comment:' . $commentId : ($timelineId ? 'timeline' : 'ignored');
                 break;
             case 'Update':
-                $commentId = self::updateReply($activity, $user, $actorId);
-                $status = $commentId ? 'comment:' . $commentId : 'ignored';
+                $commentId = 0;
+                $timelineId = 0;
+                foreach ($recipientUsers as $recipientUser) {
+                    $updatedComment = self::updateReply($activity, $recipientUser, $actorId);
+                    if ($updatedComment) {
+                        $commentId = $updatedComment;
+                    } else {
+                        $timelineId = Fediverse_Client::storeTimeline($activity, $recipientUser, $actorId) ?: $timelineId;
+                    }
+                }
+                $status = $commentId ? 'comment:' . $commentId : ($timelineId ? 'timeline' : 'ignored');
                 break;
             case 'Delete':
                 self::deleteReply($objectId, $actorId);
+                $deleted = 0;
+                foreach ($recipientUsers as $recipientUser) {
+                    $deleted += Fediverse_Client::deleteTimeline($objectId, $recipientUser, $actorId);
+                }
+                $status = $deleted ? 'timeline' : 'accepted';
                 break;
             case 'Like':
             case 'Announce':
@@ -447,6 +507,12 @@ class Fediverse_ActivityPub
             $targets[] = $object;
         }
         if (is_array($activityObject)) {
+            $embeddedActor = is_array($activityObject['actor'] ?? null)
+                ? (string)($activityObject['actor']['id'] ?? '')
+                : (string)($activityObject['actor'] ?? '');
+            if ($embeddedActor !== '') {
+                $targets[] = $embeddedActor;
+            }
             $nestedObject = self::objectId($activityObject['object'] ?? null);
             if ($nestedObject !== '') {
                 $targets[] = $nestedObject;

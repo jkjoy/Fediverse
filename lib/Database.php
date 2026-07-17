@@ -56,6 +56,26 @@ class Fediverse_Database
             . '`content_hash` char(64) NOT NULL, `published` int unsigned NOT NULL, `updated` int unsigned NOT NULL, '
             . 'PRIMARY KEY (`cid`)'
             . ') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4');
+        $db->query('CREATE TABLE IF NOT EXISTS `' . $p . 'fediverse_followings` ('
+            . '`id` int unsigned NOT NULL AUTO_INCREMENT, `uid` int unsigned NOT NULL, `actor_hash` char(64) NOT NULL, '
+            . '`actor` varchar(512) NOT NULL, `inbox` varchar(512) NOT NULL, `shared_inbox` varchar(512) DEFAULT NULL, '
+            . '`follow_id` varchar(512) NOT NULL, `state` varchar(16) NOT NULL, `created` int unsigned NOT NULL, '
+            . '`updated` int unsigned NOT NULL, PRIMARY KEY (`id`), UNIQUE KEY `uid_actor` (`uid`,`actor_hash`), '
+            . 'KEY `uid_state` (`uid`,`state`)'
+            . ') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4');
+        $db->query('CREATE TABLE IF NOT EXISTS `' . $p . 'fediverse_timeline` ('
+            . '`tid` int unsigned NOT NULL AUTO_INCREMENT, `uid` int unsigned NOT NULL, `object_hash` char(64) NOT NULL, '
+            . '`activity_id` text NOT NULL, `object_id` text NOT NULL, `actor` text NOT NULL, `object_type` varchar(32) NOT NULL, '
+            . '`url` text, `content` longtext NOT NULL, `published` int unsigned NOT NULL, `updated` int unsigned NOT NULL, '
+            . '`liked_activity` text, `announced_activity` text, `deleted` tinyint unsigned NOT NULL DEFAULT 0, '
+            . 'PRIMARY KEY (`tid`), UNIQUE KEY `object_hash` (`object_hash`), KEY `uid_published` (`uid`,`published`), '
+            . 'KEY `published` (`published`)'
+            . ') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4');
+        $db->query('CREATE TABLE IF NOT EXISTS `' . $p . 'fediverse_replies` ('
+            . '`token` char(32) NOT NULL, `uid` int unsigned NOT NULL, `in_reply_to` text NOT NULL, `content` longtext NOT NULL, '
+            . '`to_actor` text NOT NULL, `published` int unsigned NOT NULL, `deleted` tinyint unsigned NOT NULL DEFAULT 0, '
+            . 'PRIMARY KEY (`token`)'
+            . ') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4');
     }
 
     private static function installPgsql($db, $p)
@@ -78,6 +98,25 @@ class Fediverse_Database
         $db->query('CREATE TABLE IF NOT EXISTS ' . $q('posts') . ' ('
             . '"cid" integer PRIMARY KEY, "uid" integer NOT NULL, "object_id" varchar(512) NOT NULL, '
             . '"content_hash" char(64) NOT NULL, "published" integer NOT NULL, "updated" integer NOT NULL)');
+        $db->query('CREATE TABLE IF NOT EXISTS ' . $q('followings') . ' ('
+            . '"id" serial PRIMARY KEY, "uid" integer NOT NULL, "actor_hash" char(64) NOT NULL, '
+            . '"actor" varchar(512) NOT NULL, "inbox" varchar(512) NOT NULL, "shared_inbox" varchar(512), '
+            . '"follow_id" varchar(512) NOT NULL, "state" varchar(16) NOT NULL, "created" integer NOT NULL, '
+            . '"updated" integer NOT NULL, UNIQUE ("uid", "actor_hash"))');
+        $db->query('CREATE INDEX IF NOT EXISTS "' . $p . 'fediverse_followings_uid_state" ON '
+            . $q('followings') . ' ("uid", "state")');
+        $db->query('CREATE TABLE IF NOT EXISTS ' . $q('timeline') . ' ('
+            . '"tid" serial PRIMARY KEY, "uid" integer NOT NULL, "object_hash" char(64) NOT NULL UNIQUE, '
+            . '"activity_id" text NOT NULL, "object_id" text NOT NULL, "actor" text NOT NULL, "object_type" varchar(32) NOT NULL, '
+            . '"url" text, "content" text NOT NULL, "published" integer NOT NULL, "updated" integer NOT NULL, '
+            . '"liked_activity" text, "announced_activity" text, "deleted" integer NOT NULL DEFAULT 0)');
+        $db->query('CREATE INDEX IF NOT EXISTS "' . $p . 'fediverse_timeline_uid_published" ON '
+            . $q('timeline') . ' ("uid", "published")');
+        $db->query('CREATE INDEX IF NOT EXISTS "' . $p . 'fediverse_timeline_published" ON '
+            . $q('timeline') . ' ("published")');
+        $db->query('CREATE TABLE IF NOT EXISTS ' . $q('replies') . ' ('
+            . '"token" char(32) PRIMARY KEY, "uid" integer NOT NULL, "in_reply_to" text NOT NULL, "content" text NOT NULL, '
+            . '"to_actor" text NOT NULL, "published" integer NOT NULL, "deleted" integer NOT NULL DEFAULT 0)');
     }
 
     private static function installSqlite($db, $p)
@@ -100,5 +139,24 @@ class Fediverse_Database
         $db->query('CREATE TABLE IF NOT EXISTS ' . $q('posts') . ' ('
             . '`cid` INTEGER PRIMARY KEY, `uid` INTEGER NOT NULL, `object_id` varchar(512) NOT NULL, '
             . '`content_hash` char(64) NOT NULL, `published` INTEGER NOT NULL, `updated` INTEGER NOT NULL)');
+        $db->query('CREATE TABLE IF NOT EXISTS ' . $q('followings') . ' ('
+            . '`id` INTEGER PRIMARY KEY AUTOINCREMENT, `uid` INTEGER NOT NULL, `actor_hash` char(64) NOT NULL, '
+            . '`actor` varchar(512) NOT NULL, `inbox` varchar(512) NOT NULL, `shared_inbox` varchar(512), '
+            . '`follow_id` varchar(512) NOT NULL, `state` varchar(16) NOT NULL, `created` INTEGER NOT NULL, '
+            . '`updated` INTEGER NOT NULL, UNIQUE (`uid`, `actor_hash`))');
+        $db->query('CREATE INDEX IF NOT EXISTS `' . $p . 'fediverse_followings_uid_state` ON '
+            . $q('followings') . ' (`uid`, `state`)');
+        $db->query('CREATE TABLE IF NOT EXISTS ' . $q('timeline') . ' ('
+            . '`tid` INTEGER PRIMARY KEY AUTOINCREMENT, `uid` INTEGER NOT NULL, `object_hash` char(64) NOT NULL UNIQUE, '
+            . '`activity_id` text NOT NULL, `object_id` text NOT NULL, `actor` text NOT NULL, `object_type` varchar(32) NOT NULL, '
+            . '`url` text, `content` text NOT NULL, `published` INTEGER NOT NULL, `updated` INTEGER NOT NULL, '
+            . '`liked_activity` text, `announced_activity` text, `deleted` INTEGER NOT NULL DEFAULT 0)');
+        $db->query('CREATE INDEX IF NOT EXISTS `' . $p . 'fediverse_timeline_uid_published` ON '
+            . $q('timeline') . ' (`uid`, `published`)');
+        $db->query('CREATE INDEX IF NOT EXISTS `' . $p . 'fediverse_timeline_published` ON '
+            . $q('timeline') . ' (`published`)');
+        $db->query('CREATE TABLE IF NOT EXISTS ' . $q('replies') . ' ('
+            . '`token` char(32) PRIMARY KEY, `uid` INTEGER NOT NULL, `in_reply_to` text NOT NULL, `content` text NOT NULL, '
+            . '`to_actor` text NOT NULL, `published` INTEGER NOT NULL, `deleted` INTEGER NOT NULL DEFAULT 0)');
     }
 }

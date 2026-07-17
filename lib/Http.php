@@ -11,8 +11,8 @@ class Fediverse_Http
     public static function getJson($url)
     {
         $response = self::request('GET', $url, array(
-            'Accept: application/activity+json, application/ld+json; profile="https://www.w3.org/ns/activitystreams", application/json',
-            'User-Agent: Typecho-Fediverse/0.1'
+            'Accept: application/activity+json, application/ld+json; profile="https://www.w3.org/ns/activitystreams", application/jrd+json, application/json',
+            'User-Agent: Typecho-Fediverse/0.4.0'
         ));
         if ($response['status'] < 200 || $response['status'] >= 300) {
             throw new RuntimeException('Remote HTTP status ' . $response['status']);
@@ -51,7 +51,7 @@ class Fediverse_Http
         $response = self::request('POST', $url, array(
             'Accept: application/activity+json',
             'Content-Type: application/activity+json',
-            'User-Agent: Typecho-Fediverse/0.1',
+            'User-Agent: Typecho-Fediverse/0.4.0',
             'Host: ' . $host,
             'Date: ' . $date,
             'Digest: ' . $digest,
@@ -208,6 +208,11 @@ class Fediverse_Http
         foreach ($ips as $ip) {
             if (!filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE)) {
                 throw new RuntimeException('Remote URL resolves to a private or reserved address');
+            }
+        }
+        foreach ($ips as $ip) {
+            if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) {
+                return $ip;
             }
         }
         return $ips[0];
