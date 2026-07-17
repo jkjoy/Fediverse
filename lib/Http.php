@@ -7,21 +7,36 @@ if (!defined('__TYPECHO_ROOT_DIR__')) {
 class Fediverse_Http
 {
     private const MAX_RESPONSE = 2097152;
+    private const MAX_REDIRECTS = 5;
 
-    public static function getJson($url)
+    public static function getJson($url, $accept = null)
     {
-        $response = self::request('GET', $url, array(
-            'Accept: application/activity+json, application/ld+json; profile="https://www.w3.org/ns/activitystreams", application/jrd+json, application/json',
-            'User-Agent: Typecho-Fediverse/0.4.0'
-        ));
-        if ($response['status'] < 200 || $response['status'] >= 300) {
-            throw new RuntimeException('Remote HTTP status ' . $response['status']);
+        $accept = $accept ?: 'application/activity+json, application/ld+json; profile="https://www.w3.org/ns/activitystreams", application/json';
+        $currentUrl = (string)$url;
+        for ($redirects = 0; ; $redirects++) {
+            $response = self::request('GET', $currentUrl, array(
+                'Accept: ' . $accept,
+                'User-Agent: Typecho-Fediverse/0.4.1'
+            ));
+            if (in_array($response['status'], array(301, 302, 303, 307, 308), true)) {
+                if ($redirects >= self::MAX_REDIRECTS) {
+                    throw new RuntimeException('Remote HTTP redirect limit exceeded');
+                }
+                if ($response['location'] === '') {
+                    throw new RuntimeException('Remote HTTP redirect is missing Location');
+                }
+                $currentUrl = self::redirectUrl($currentUrl, $response['location']);
+                continue;
+            }
+            if ($response['status'] < 200 || $response['status'] >= 300) {
+                throw new RuntimeException('Remote HTTP status ' . $response['status'] . ' for ' . $currentUrl);
+            }
+            $data = json_decode($response['body'], true, 32);
+            if (!is_array($data)) {
+                throw new RuntimeException('Remote response is not valid JSON');
+            }
+            return $data;
         }
-        $data = json_decode($response['body'], true, 32);
-        if (!is_array($data)) {
-            throw new RuntimeException('Remote response is not valid JSON');
-        }
-        return $data;
     }
 
     public static function signedPost($url, $activity, $actor)
@@ -51,7 +66,7 @@ class Fediverse_Http
         $response = self::request('POST', $url, array(
             'Accept: application/activity+json',
             'Content-Type: application/activity+json',
-            'User-Agent: Typecho-Fediverse/0.4.0',
+            'User-Agent: Typecho-Fediverse/0.4.1',
             'Host: ' . $host,
             'Date: ' . $date,
             'Digest: ' . $digest,
@@ -154,6 +169,7 @@ class Fediverse_Http
         $resolveIp = str_contains($resolvedIp, ':') ? '[' . $resolvedIp . ']' : $resolvedIp;
         $responseBody = '';
         $tooLarge = false;
+        $location = '';
         $ch = curl_init($url);
         curl_setopt_array($ch, array(
             CURLOPT_CUSTOMREQUEST => $method,
@@ -166,6 +182,12 @@ class Fediverse_Http
             CURLOPT_SSL_VERIFYPEER => true,
             CURLOPT_SSL_VERIFYHOST => 2,
             CURLOPT_RESOLVE => array($host . ':' . $port . ':' . $resolveIp),
+            CURLOPT_HEADERFUNCTION => static function ($handle, $line) use (&$location) {
+                if (stripos($line, 'Location:') === 0) {
+                    $location = trim(substr($line, 9));
+                }
+                return strlen($line);
+            },
             CURLOPT_WRITEFUNCTION => static function ($handle, $chunk) use (&$responseBody, &$tooLarge) {
                 if (strlen($responseBody) + strlen($chunk) > self::MAX_RESPONSE) {
                     $tooLarge = true;
@@ -188,7 +210,74 @@ class Fediverse_Http
         if ($success === false) {
             throw new RuntimeException('Remote request failed: ' . $error);
         }
-        return array('status' => $status, 'body' => $responseBody);
+        return array('status' => $status, 'body' => $responseBody, 'location' => $location);
+    }
+
+    private static function redirectUrl($baseUrl, $location)
+    {
+        $location = trim((string)$location);
+        if ($location === '') {
+            throw new RuntimeException('Remote HTTP redirect is missing Location');
+        }
+        if (preg_match('/^[a-z][a-z0-9+.-]*:/i', $location)) {
+            return $location;
+        }
+
+        $base = parse_url((string)$baseUrl);
+        if (!$base || empty($base['host'])) {
+            throw new RuntimeException('Remote HTTP redirect base URL is invalid');
+        }
+        if (str_starts_with($location, '//')) {
+            return 'https:' . $location;
+        }
+
+        $fragment = strpos($location, '#');
+        if ($fragment !== false) {
+            $location = substr($location, 0, $fragment);
+        }
+        $relative = parse_url($location);
+        if ($relative === false) {
+            throw new RuntimeException('Remote HTTP redirect Location is invalid');
+        }
+        if (str_starts_with($location, '?')) {
+            $path = (string)($base['path'] ?? '/');
+            $query = (string)($relative['query'] ?? '');
+        } else {
+            $path = (string)($relative['path'] ?? '');
+            if (!str_starts_with($path, '/')) {
+                $basePath = (string)($base['path'] ?? '/');
+                $slash = strrpos($basePath, '/');
+                $path = substr($basePath, 0, $slash === false ? 0 : $slash + 1) . $path;
+            }
+            $query = isset($relative['query']) ? (string)$relative['query'] : null;
+        }
+        $path = self::normalizePath($path === '' ? '/' : $path);
+        $host = (string)$base['host'];
+        if (str_contains($host, ':')) {
+            $host = '[' . trim($host, '[]') . ']';
+        }
+        $url = 'https://' . $host . (isset($base['port']) ? ':' . (int)$base['port'] : '') . $path;
+        return $query === null ? $url : $url . '?' . $query;
+    }
+
+    private static function normalizePath($path)
+    {
+        $segments = array();
+        foreach (explode('/', (string)$path) as $segment) {
+            if ($segment === '' || $segment === '.') {
+                continue;
+            }
+            if ($segment === '..') {
+                array_pop($segments);
+            } else {
+                $segments[] = $segment;
+            }
+        }
+        $normalized = '/' . implode('/', $segments);
+        if ($normalized !== '/' && str_ends_with((string)$path, '/')) {
+            $normalized .= '/';
+        }
+        return $normalized;
     }
 
     private static function assertSafeUrl($url)

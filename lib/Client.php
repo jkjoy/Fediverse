@@ -26,9 +26,14 @@ class Fediverse_Client
                 || !empty($originParts['path']) || isset($originParts['query']) || isset($originParts['fragment'])) {
                 throw new InvalidArgumentException('远端账号域名无效');
             }
-            $webfinger = Fediverse_Http::getJson(
-                $origin . '/.well-known/webfinger?resource=' . rawurlencode('acct:' . $account)
-            );
+            try {
+                $webfinger = Fediverse_Http::getJson(
+                    $origin . '/.well-known/webfinger?resource=' . rawurlencode('acct:' . $account),
+                    'application/jrd+json, application/json'
+                );
+            } catch (RuntimeException $e) {
+                throw new RuntimeException('WebFinger 请求失败：' . $e->getMessage(), 0, $e);
+            }
             $actorUrl = '';
             foreach ((array)($webfinger['links'] ?? array()) as $link) {
                 if (is_array($link) && ($link['rel'] ?? '') === 'self' && self::isHttpsUrl($link['href'] ?? '')) {
@@ -43,7 +48,11 @@ class Fediverse_Client
             }
         }
 
-        $actor = Fediverse_Http::getJson($actorUrl);
+        try {
+            $actor = Fediverse_Http::getJson($actorUrl);
+        } catch (RuntimeException $e) {
+            throw new RuntimeException('Actor 获取失败：' . $e->getMessage(), 0, $e);
+        }
         $id = (string)($actor['id'] ?? '');
         $inbox = (string)($actor['inbox'] ?? '');
         $shared = (string)($actor['endpoints']['sharedInbox'] ?? '');

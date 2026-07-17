@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.1
+
+- WebFinger 与 Actor JSON 请求支持最多 5 次安全 HTTPS 重定向，每一跳重新校验 DNS 和公网 IP，兼容使用规范域名跳转的 GoToSocial 实例。
+- WebFinger 使用专用 JRD `Accept` 请求头，兼容拒绝 ActivityPub 媒体类型的部分 Pleroma/Akkoma 实例。
+- 远端账号解析错误会区分 WebFinger 和 Actor 阶段，并显示最终请求地址，便于定位实例端的 404。
+
 ## 0.4.0
 
 - 新增远端账号 WebFinger 查找、主动关注、取消关注、`following` 集合以及 `Accept`、`Reject` 状态处理。
