@@ -13,7 +13,7 @@ require_once __DIR__ . '/AdminAction.php';
  *
  * @package Fediverse
  * @author Typecho Community
- * @version 0.5.0
+ * @version 0.5.1
  * @link https://www.w3.org/TR/activitypub/
  */
 class Fediverse_Plugin implements Typecho_Plugin_Interface
@@ -266,7 +266,8 @@ class Fediverse_Plugin implements Typecho_Plugin_Interface
         }
 
         $reply = $db->fetchRow($db->select(array('COUNT(*)' => 'num'))->from('table.comments')
-            ->where('cid = ?', $cid)->where('type = ?', 'comment')->where('status = ?', 'approved')
+            ->where('cid = ?', $cid)->where('type = ?', 'comment')
+            ->where('status IN ?', array('approved', 'waiting'))
             ->where('agent = ?', 'ActivityPub'));
         $data['replies'] = (int)($reply['num'] ?? 0);
         if ($data['likes'] + $data['announces'] > 0) {
