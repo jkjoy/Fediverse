@@ -23,8 +23,16 @@ class Fediverse_ActivityPub
         if ($url === '') {
             $url = Fediverse_Core::url('author/' . rawurlencode((string)$user['name']) . '/');
         }
-        return array(
-            '@context' => array(self::CONTEXT, 'https://w3id.org/security/v1'),
+        $document = array(
+            '@context' => array(
+                self::CONTEXT,
+                'https://w3id.org/security/v1',
+                array(
+                    'schema' => 'http://schema.org#',
+                    'PropertyValue' => 'schema:PropertyValue',
+                    'value' => 'schema:value'
+                )
+            ),
             'id' => $id,
             'type' => 'Person',
             'preferredUsername' => $username,
@@ -45,6 +53,51 @@ class Fediverse_ActivityPub
                 'publicKeyPem' => $actor['public_key']
             )
         );
+
+        $avatarUrl = self::httpsUrl($personal['avatarUrl'] ?? '');
+        if ($avatarUrl !== '') {
+            $document['icon'] = array('type' => 'Image', 'url' => $avatarUrl);
+        }
+        $headerUrl = self::httpsUrl($personal['headerUrl'] ?? '');
+        if ($headerUrl !== '') {
+            $document['image'] = array('type' => 'Image', 'url' => $headerUrl);
+        }
+
+        $attachments = array();
+        for ($index = 1; $index <= 4; $index++) {
+            $name = trim((string)($personal['profileField' . $index . 'Name'] ?? ''));
+            $value = trim((string)($personal['profileField' . $index . 'Value'] ?? ''));
+            if ($name === '' || $value === '') {
+                continue;
+            }
+            $link = self::httpsUrl($value);
+            $escapedValue = htmlspecialchars($value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+            $attachments[] = array(
+                'type' => 'PropertyValue',
+                'name' => htmlspecialchars($name, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8'),
+                'value' => $link === ''
+                    ? $escapedValue
+                    : '<a href="' . htmlspecialchars($link, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8')
+                        . '" rel="me nofollow noopener noreferrer">' . $escapedValue . '</a>'
+            );
+        }
+        if ($attachments) {
+            $document['attachment'] = $attachments;
+        }
+
+        return $document;
+    }
+
+    private static function httpsUrl($value)
+    {
+        $url = trim((string)$value);
+        $parts = parse_url($url);
+        if ($url === '' || !filter_var($url, FILTER_VALIDATE_URL) || !is_array($parts)
+            || strtolower((string)($parts['scheme'] ?? '')) !== 'https' || empty($parts['host'])
+            || isset($parts['user']) || isset($parts['pass'])) {
+            return '';
+        }
+        return $url;
     }
 
     public static function webfinger($resource)

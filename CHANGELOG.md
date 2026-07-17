@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.0
+
+- 新增每位作者独立的联邦头像和 Banner 设置，并通过 Actor 的 `icon`、`image` 字段提供给 Mastodon 等远端实例。
+- 新增最多 4 组 Mastodon 兼容个人资料字段；HTTPS 内容安全输出为 `rel=me` 链接，其他内容按纯文本转义。
+
 ## 0.4.3
 
 - 构建文章 ActivityPub 对象时隔离并丢弃主题或内容插件的意外输出，修复 Outbox 和单篇对象被 UTF-8 BOM 污染后 Mastodon 无法解析文章的问题。

@@ -13,7 +13,7 @@ require_once __DIR__ . '/AdminAction.php';
  *
  * @package Fediverse
  * @author Typecho Community
- * @version 0.4.3
+ * @version 0.5.0
  * @link https://www.w3.org/TR/activitypub/
  */
 class Fediverse_Plugin implements Typecho_Plugin_Interface
@@ -193,6 +193,48 @@ class Fediverse_Plugin implements Typecho_Plugin_Interface
             _t('留空时使用插件的默认账号简介。')
         );
         $form->addInput($summary);
+
+        $avatarUrl = new Typecho_Widget_Helper_Form_Element_Text(
+            'avatarUrl',
+            null,
+            '',
+            _t('头像地址'),
+            _t('填写可公开访问的 HTTPS 图片地址；留空时不向联邦宇宙提供头像。')
+        );
+        $avatarUrl->addRule('url', _t('头像地址格式不正确'));
+        $avatarUrl->addRule('regexp', _t('头像地址必须是 HTTPS 地址'), '/^$|^https:\/\/[^\s]+$/i');
+        $form->addInput($avatarUrl);
+
+        $headerUrl = new Typecho_Widget_Helper_Form_Element_Text(
+            'headerUrl',
+            null,
+            '',
+            _t('Banner 地址'),
+            _t('填写可公开访问的 HTTPS 图片地址；在 Mastodon 中显示为个人资料页背景图。')
+        );
+        $headerUrl->addRule('url', _t('Banner 地址格式不正确'));
+        $headerUrl->addRule('regexp', _t('Banner 地址必须是 HTTPS 地址'), '/^$|^https:\/\/[^\s]+$/i');
+        $form->addInput($headerUrl);
+
+        for ($index = 1; $index <= 4; $index++) {
+            $fieldName = new Typecho_Widget_Helper_Form_Element_Text(
+                'profileField' . $index . 'Name',
+                null,
+                '',
+                _t('资料字段 %d：名称', $index),
+                $index === 1 ? _t('例如“网站”“位置”或“关键词”。名称和内容都填写时才会显示。') : null
+            );
+            $form->addInput($fieldName);
+
+            $fieldValue = new Typecho_Widget_Helper_Form_Element_Text(
+                'profileField' . $index . 'Value',
+                null,
+                '',
+                _t('资料字段 %d：内容', $index),
+                $index === 1 ? _t('HTTPS 地址会显示为可点击且可用于 rel=me 验证的链接，其他内容按纯文本显示。') : null
+            );
+            $form->addInput($fieldValue);
+        }
     }
 
     public static function postInteractions($cid)
