@@ -59,8 +59,34 @@ $panelUrl = static function ($target = 'overview') use ($options) {
     }
     return Typecho_Common::url($query, $options->adminUrl);
 };
-$actionUrl = static function ($query) use ($security) {
-    return $security->getIndex('/action/fediverse-admin?' . ltrim((string)$query, '?'));
+$actionUrl = static function ($query, $returnView = null) use ($security, $view) {
+    $returnView = $returnView === null ? $view : (string)$returnView;
+    return $security->getIndex('/action/fediverse-admin?' . ltrim((string)$query, '?') . '&view=' . rawurlencode($returnView));
+};
+$activityTypeLabel = static function ($type) {
+    $labels = array(
+        'Follow' => _t('关注'),
+        'Create' => _t('回复'),
+        'Update' => _t('编辑回复'),
+        'Delete' => _t('删除回复'),
+        'Like' => _t('点赞'),
+        'Announce' => _t('转发'),
+        'Undo' => _t('撤销')
+    );
+    return $labels[(string)$type] ?? (string)$type;
+};
+$activityStatus = static function ($status) {
+    $status = (string)$status;
+    if (preg_match('/^comment:(\d+)$/', $status, $matches)) {
+        return array(_t('待审核评论 #%d', (int)$matches[1]), 'warn', (int)$matches[1]);
+    }
+    $labels = array(
+        'accepted' => array(_t('已接收'), '', 0),
+        'ignored' => array(_t('已忽略'), 'warn', 0),
+        'undone' => array(_t('已撤销'), 'muted', 0),
+        'deleted' => array(_t('已删除'), 'muted', 0)
+    );
+    return $labels[$status] ?? array($status, 'warn', 0);
 };
 
 include 'header.php';
@@ -78,13 +104,19 @@ html{-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
 .fed-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0 0 16px}
 .fed-actions .btn{display:inline-flex;align-items:center;justify-content:center;min-height:40px;box-sizing:border-box;transition-property:scale;transition-duration:150ms;transition-timing-function:ease-out}
 .fed-actions .btn:active{scale:.96}
+.fed-action.is-busy{pointer-events:none;opacity:.65}
 .fed-actions .fed-spacer{flex:1}
 .fed-endpoints{margin:12px 0 20px;padding:10px 0;border-top:1px solid #eee;border-bottom:1px solid #eee}
 .fed-endpoint{display:grid;grid-template-columns:120px minmax(0,1fr);gap:12px;padding:5px 0;line-height:1.6;text-wrap:pretty}
 .fed-endpoint code,.fed-break{word-break:break-all}
+.fed-value{display:flex;align-items:center;gap:8px;min-width:0}
+.fed-value code{min-width:0}
+.fed-copy{flex:0 0 auto;min-height:40px;padding:0 9px;border:1px solid #d5d5d2;border-radius:4px;background:#fff;color:#555;cursor:pointer}
+.fed-copy:hover{border-color:#b8b8b4;color:#222}
 .fed-state{display:inline-block;padding:1px 6px;border-radius:4px;background:#edf7ed;color:#286b32;font-size:12px}
 .fed-state.warn{background:#fff6df;color:#8a5a00}
 .fed-state.error{background:#fff0ee;color:#a33226}
+.fed-state.muted{background:#f0f0ee;color:#666}
 .fed-muted{color:#888}
 .fed-table-actions{white-space:nowrap}
 .fed-table-actions a{display:inline-flex;align-items:center;min-height:40px}
@@ -93,7 +125,9 @@ html{-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
 .fed-tabs a{display:inline-flex;align-items:center;min-height:40px;box-sizing:border-box}
 .fed-status,.typecho-list-table{font-variant-numeric:tabular-nums}
 .typecho-table-wrap{overflow-x:auto}
-.fed-actions a:focus-visible,.fed-tabs a:focus-visible,.fed-table-actions a:focus-visible{outline:2px solid #467b96;outline-offset:2px}
+.fed-actions a:focus-visible,.fed-tabs a:focus-visible,.fed-table-actions a:focus-visible,.fed-copy:focus-visible{outline:2px solid #467b96;outline-offset:2px}
+.fed-live{position:fixed;right:20px;bottom:20px;z-index:1000;padding:9px 12px;border-radius:4px;background:#262626;color:#fff;box-shadow:0 4px 14px rgba(0,0,0,.18)}
+.fed-live[hidden]{display:none}
 @media(max-width:760px){.fed-status{grid-template-columns:repeat(2,minmax(0,1fr))}.fed-stat{border-bottom:1px solid #e5e5e2}.fed-endpoint{grid-template-columns:1fr;gap:0}.typecho-list-table{min-width:760px}}
 </style>
 
@@ -111,9 +145,9 @@ html{-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
                 </div>
 
                 <div class="fed-actions">
-                    <a class="btn btn-s primary" href="<?php echo $e($actionUrl('do=run-queue')); ?>"><?php _e('立即处理队列'); ?></a>
-                    <a class="btn btn-s" href="<?php echo $e($actionUrl('do=provision-actors')); ?>"><?php _e('生成作者身份'); ?></a>
-                    <a class="btn btn-s" href="<?php echo $e($actionUrl('do=prune-activities')); ?>"><?php _e('清理过期活动'); ?></a>
+                    <a class="btn btn-s primary fed-action" data-busy="<?php _e('正在处理…'); ?>" href="<?php echo $e($actionUrl('do=run-queue', 'queue')); ?>"><?php _e('立即处理队列'); ?></a>
+                    <a class="btn btn-s fed-action" data-busy="<?php _e('正在生成…'); ?>" href="<?php echo $e($actionUrl('do=provision-actors', 'overview')); ?>"><?php _e('生成作者身份'); ?></a>
+                    <a class="btn btn-s fed-action operate-delete" data-busy="<?php _e('正在清理…'); ?>" data-confirm="<?php _e('确认清理超过保留天数的入站活动吗？'); ?>" href="<?php echo $e($actionUrl('do=prune-activities', 'activities')); ?>"><?php _e('清理过期活动'); ?></a>
                     <span class="fed-spacer"></span>
                     <a href="<?php echo $e(Typecho_Common::url('options-plugin.php?config=Fediverse', $options->adminUrl)); ?>"><?php _e('插件设置'); ?></a>
                 </div>
@@ -132,9 +166,12 @@ html{-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
                     ?>
                     <div class="fed-endpoints">
                         <div class="fed-endpoint"><strong><?php _e('HTTPS'); ?></strong><span><span class="fed-state <?php echo $httpsReady ? '' : 'error'; ?>"><?php echo $httpsReady ? _t('正常') : _t('未启用'); ?></span></span></div>
-                        <div class="fed-endpoint"><strong><?php _e('共享收件箱'); ?></strong><code><?php echo $e(Fediverse_Core::url('fediverse/inbox')); ?></code></div>
-                        <div class="fed-endpoint"><strong><?php _e('WebFinger'); ?></strong><code><?php echo $e(Fediverse_Core::origin() . '/.well-known/webfinger'); ?></code></div>
-                        <div class="fed-endpoint"><strong><?php _e('Cron'); ?></strong><code><?php echo $cronToken !== '' ? $e(Fediverse_Core::url('fediverse/cron/' . $cronToken)) : _t('尚未保存令牌'); ?></code></div>
+                        <?php $sharedInbox = Fediverse_Core::url('fediverse/inbox'); ?>
+                        <?php $webfingerUrl = Fediverse_Core::origin() . '/.well-known/webfinger'; ?>
+                        <?php $cronUrl = $cronToken !== '' ? Fediverse_Core::url('fediverse/cron/' . $cronToken) : ''; ?>
+                        <div class="fed-endpoint"><strong><?php _e('共享收件箱'); ?></strong><span class="fed-value"><code><?php echo $e($sharedInbox); ?></code><button class="fed-copy" type="button" data-copy="<?php echo $e($sharedInbox); ?>"><?php _e('复制'); ?></button></span></div>
+                        <div class="fed-endpoint"><strong><?php _e('WebFinger'); ?></strong><span class="fed-value"><code><?php echo $e($webfingerUrl); ?></code><button class="fed-copy" type="button" data-copy="<?php echo $e($webfingerUrl); ?>"><?php _e('复制'); ?></button></span></div>
+                        <div class="fed-endpoint"><strong><?php _e('Cron'); ?></strong><span class="fed-value"><code><?php echo $cronUrl !== '' ? $e($cronUrl) : _t('尚未保存令牌'); ?></code><?php if ($cronUrl !== ''): ?><button class="fed-copy" type="button" data-copy="<?php echo $e($cronUrl); ?>"><?php _e('复制'); ?></button><?php endif; ?></span></div>
                     </div>
 
                     <div class="typecho-table-wrap">
@@ -152,7 +189,8 @@ html{-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
                                 ?>
                                 <tr>
                                     <td><strong><?php echo $e($localUser['screenName'] ?: $localUser['name']); ?></strong><br><span class="fed-muted">UID <?php echo $uid; ?></span></td>
-                                    <td class="fed-break"><code>@<?php echo $e($username); ?>@<?php echo $e(Fediverse_Core::domain()); ?></code></td>
+                                    <?php $handle = '@' . $username . '@' . Fediverse_Core::domain(); ?>
+                                    <td class="fed-break"><span class="fed-value"><code><?php echo $e($handle); ?></code><button class="fed-copy" type="button" data-copy="<?php echo $e($handle); ?>"><?php _e('复制'); ?></button></span></td>
                                     <td><span class="fed-state <?php echo !$enabled ? 'error' : ($actor ? '' : 'warn'); ?>"><?php echo !$enabled ? _t('作者已停用') : ($actor ? _t('可发现') : _t('待生成')); ?></span></td>
                                     <td><?php echo $actor ? $e($formatTime($actor['created'])) : '-'; ?></td>
                                     <td><?php if ($actor): ?><a href="<?php echo $e($actorUrl); ?>" target="_blank" rel="noopener noreferrer"><?php _e('查看'); ?></a><?php else: ?>-<?php endif; ?></td>
@@ -177,7 +215,7 @@ html{-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
                                     <td class="fed-break"><a href="<?php echo $e($row['inbox']); ?>" target="_blank" rel="noopener noreferrer nofollow"><?php echo $e($row['inbox']); ?></a></td>
                                     <td><span class="fed-state <?php echo $failed ? 'error' : ((int)$row['attempts'] > 0 ? 'warn' : ''); ?>"><?php echo $failed ? _t('已停止') : (int)$row['attempts']; ?></span></td>
                                     <td class="fed-break"><?php echo $row['last_error'] ? $e($row['last_error']) : '-'; ?></td>
-                                    <td class="fed-table-actions"><a href="<?php echo $e($actionUrl('do=retry-queue&qid=' . (int)$row['qid'])); ?>"><?php _e('重试'); ?></a><a class="operate-delete" lang="<?php _e('确认删除此投递任务吗？'); ?>" href="<?php echo $e($actionUrl('do=delete-queue&qid=' . (int)$row['qid'])); ?>"><?php _e('删除'); ?></a></td>
+                                    <td class="fed-table-actions"><a class="fed-action" data-busy="<?php _e('处理中…'); ?>" href="<?php echo $e($actionUrl('do=retry-queue&qid=' . (int)$row['qid'], 'queue')); ?>"><?php _e('重试'); ?></a><a class="fed-action operate-delete" data-busy="<?php _e('删除中…'); ?>" data-confirm="<?php _e('确认删除此投递任务吗？'); ?>" href="<?php echo $e($actionUrl('do=delete-queue&qid=' . (int)$row['qid'], 'queue')); ?>"><?php _e('删除'); ?></a></td>
                                 </tr>
                             <?php endforeach; ?>
                             <?php if (!$rows): ?><tr><td colspan="6"><?php _e('投递队列为空'); ?></td></tr><?php endif; ?>
@@ -198,7 +236,7 @@ html{-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
                                     <td class="fed-break"><a href="<?php echo $e($row['actor']); ?>" target="_blank" rel="noopener noreferrer nofollow"><?php echo $e($row['actor']); ?></a></td>
                                     <td class="fed-break"><?php echo $e($row['shared_inbox'] ?: $row['inbox']); ?></td>
                                     <td><?php echo $e($formatTime($row['created'])); ?></td>
-                                    <td><a class="operate-delete" lang="<?php _e('确认移除此关注者吗？'); ?>" href="<?php echo $e($actionUrl('do=remove-follower&id=' . (int)$row['id'])); ?>"><?php _e('移除'); ?></a></td>
+                                    <td><a class="fed-action operate-delete" data-busy="<?php _e('移除中…'); ?>" data-confirm="<?php _e('确认移除此关注者吗？'); ?>" href="<?php echo $e($actionUrl('do=remove-follower&id=' . (int)$row['id'], 'followers')); ?>"><?php _e('移除'); ?></a></td>
                                 </tr>
                             <?php endforeach; ?>
                             <?php if (!$rows): ?><tr><td colspan="5"><?php _e('暂无关注者'); ?></td></tr><?php endif; ?>
@@ -213,12 +251,13 @@ html{-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
                             <thead><tr><th>ID</th><th><?php _e('类型'); ?></th><th><?php _e('Actor'); ?></th><th><?php _e('对象'); ?></th><th><?php _e('处理'); ?></th><th><?php _e('时间'); ?></th></tr></thead>
                             <tbody>
                             <?php foreach ($rows as $row): ?>
+                                <?php $status = $activityStatus($row['status']); ?>
                                 <tr>
                                     <td><?php echo (int)$row['aid']; ?></td>
-                                    <td><strong><?php echo $e($row['type']); ?></strong></td>
+                                    <td><strong><?php echo $e($activityTypeLabel($row['type'])); ?></strong><br><span class="fed-muted"><?php echo $e($row['type']); ?></span></td>
                                     <td class="fed-break"><a href="<?php echo $e($row['actor']); ?>" target="_blank" rel="noopener noreferrer nofollow"><?php echo $e($row['actor']); ?></a></td>
-                                    <td class="fed-break"><?php echo $row['object_id'] ? $e($row['object_id']) : '-'; ?></td>
-                                    <td><span class="fed-state <?php echo $row['status'] === 'ignored' ? 'warn' : ''; ?>"><?php echo $e($row['status']); ?></span></td>
+                                    <td class="fed-break"><?php if ($row['object_id'] && filter_var($row['object_id'], FILTER_VALIDATE_URL)): ?><a href="<?php echo $e($row['object_id']); ?>" target="_blank" rel="noopener noreferrer nofollow"><?php echo $e($row['object_id']); ?></a><?php else: ?><?php echo $row['object_id'] ? $e($row['object_id']) : '-'; ?><?php endif; ?></td>
+                                    <td><span class="fed-state <?php echo $e($status[1]); ?>"><?php echo $e($status[0]); ?></span><?php if ($status[2]): ?><br><a href="<?php echo $e(Typecho_Common::url('manage-comments.php?status=waiting', $options->adminUrl)); ?>"><?php _e('前往审核'); ?></a><?php endif; ?></td>
                                     <td><?php echo $e($formatTime($row['created'])); ?></td>
                                 </tr>
                             <?php endforeach; ?>
@@ -232,16 +271,41 @@ html{-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
     </div>
 </div>
 
+<div class="fed-live" role="status" aria-live="polite" hidden></div>
+
 <?php
 include 'copyright.php';
 include 'common-js.php';
 ?>
 <script>
 (function(){
-    var links=document.querySelectorAll('.operate-delete');
-    for(var i=0;i<links.length;i++){
-        links[i].addEventListener('click',function(event){
-            if(!window.confirm(this.getAttribute('lang')||'')){event.preventDefault();}
+    var actions=document.querySelectorAll('.fed-action');
+    for(var i=0;i<actions.length;i++){
+        actions[i].addEventListener('click',function(event){
+            var prompt=this.getAttribute('data-confirm');
+            if(prompt&&!window.confirm(prompt)){event.preventDefault();return;}
+            if(this.classList.contains('is-busy')){event.preventDefault();return;}
+            this.classList.add('is-busy');
+            this.setAttribute('aria-disabled','true');
+            var busy=this.getAttribute('data-busy');
+            if(busy){this.textContent=busy;}
+        });
+    }
+    var live=document.querySelector('.fed-live');
+    var copies=document.querySelectorAll('.fed-copy');
+    function copied(){
+        live.textContent='<?php _e('已复制'); ?>';live.hidden=false;
+        window.setTimeout(function(){live.hidden=true;},1600);
+    }
+    function legacyCopy(value){
+        var input=document.createElement('textarea');input.value=value;input.setAttribute('readonly','');input.style.position='fixed';input.style.opacity='0';document.body.appendChild(input);input.select();
+        if(document.execCommand('copy')){copied();}document.body.removeChild(input);
+    }
+    for(var j=0;j<copies.length;j++){
+        copies[j].addEventListener('click',function(){
+            var value=this.getAttribute('data-copy')||'';
+            if(navigator.clipboard&&window.isSecureContext){navigator.clipboard.writeText(value).then(copied,function(){legacyCopy(value);});return;}
+            legacyCopy(value);
         });
     }
 })();

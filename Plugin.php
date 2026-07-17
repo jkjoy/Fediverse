@@ -13,7 +13,7 @@ require_once __DIR__ . '/AdminAction.php';
  *
  * @package Fediverse
  * @author Typecho Community
- * @version 0.2.1
+ * @version 0.3.0
  * @link https://www.w3.org/TR/activitypub/
  */
 class Fediverse_Plugin implements Typecho_Plugin_Interface
@@ -175,6 +175,114 @@ class Fediverse_Plugin implements Typecho_Plugin_Interface
             _t('留空时使用插件的默认账号简介。')
         );
         $form->addInput($summary);
+    }
+
+    public static function postInteractions($cid)
+    {
+        $cid = (int)$cid;
+        $data = array('likes' => 0, 'announces' => 0, 'replies' => 0, 'recent' => array());
+        if ($cid <= 0 || !Fediverse_Core::isEnabled()) {
+            return $data;
+        }
+
+        $db = Typecho_Db::get();
+        $objectIds = array(Fediverse_Core::objectUrl($cid));
+        $tracked = $db->fetchRow($db->select('object_id')->from(Fediverse_Database::table('posts'))
+            ->where('cid = ?', $cid)->limit(1));
+        if ($tracked && !in_array((string)$tracked['object_id'], $objectIds, true)) {
+            $objectIds[] = (string)$tracked['object_id'];
+        }
+
+        $counts = $db->fetchAll($db->select('type', array('COUNT(*)' => 'num'))
+            ->from(Fediverse_Database::table('activities'))
+            ->where('object_id IN ?', $objectIds)->where('type IN ?', array('Like', 'Announce'))
+            ->where('status = ?', 'accepted')->group('type'));
+        foreach ($counts as $count) {
+            if ((string)$count['type'] === 'Like') {
+                $data['likes'] = (int)$count['num'];
+            } elseif ((string)$count['type'] === 'Announce') {
+                $data['announces'] = (int)$count['num'];
+            }
+        }
+
+        $reply = $db->fetchRow($db->select(array('COUNT(*)' => 'num'))->from('table.comments')
+            ->where('cid = ?', $cid)->where('type = ?', 'comment')->where('status = ?', 'approved')
+            ->where('agent = ?', 'ActivityPub'));
+        $data['replies'] = (int)($reply['num'] ?? 0);
+        if ($data['likes'] + $data['announces'] > 0) {
+            $data['recent'] = $db->fetchAll($db->select('type', 'actor', 'created')
+                ->from(Fediverse_Database::table('activities'))
+                ->where('object_id IN ?', $objectIds)->where('type IN ?', array('Like', 'Announce'))
+                ->where('status = ?', 'accepted')->order('aid', Typecho_Db::SORT_DESC)->limit(12));
+        }
+        return $data;
+    }
+
+    public static function renderPostInteractions($archive)
+    {
+        if (!$archive || !method_exists($archive, 'is') || !$archive->is('post')) {
+            return;
+        }
+        if (!Fediverse_Core::userEnabled((int)$archive->authorId)) {
+            return;
+        }
+        $data = self::postInteractions((int)$archive->cid);
+        $e = static fn($value) => htmlspecialchars((string)$value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+        ?>
+        <section class="fediverse-interactions" aria-labelledby="fediverse-interactions-title">
+            <div class="fediverse-interactions__header">
+                <h2 id="fediverse-interactions-title"><?php _e('联邦宇宙互动'); ?></h2>
+                <span>ActivityPub</span>
+            </div>
+            <dl class="fediverse-interactions__stats">
+                <div><dt><?php _e('点赞'); ?></dt><dd><?php echo (int)$data['likes']; ?></dd></div>
+                <div><dt><?php _e('转发'); ?></dt><dd><?php echo (int)$data['announces']; ?></dd></div>
+                <div><dt><?php _e('联邦回复'); ?></dt><dd><?php echo (int)$data['replies']; ?></dd></div>
+            </dl>
+            <?php if ($data['recent']): ?>
+                <details class="fediverse-interactions__details">
+                    <summary><?php _e('查看最近互动'); ?></summary>
+                    <ul>
+                        <?php foreach ($data['recent'] as $interaction): ?>
+                            <?php
+                            $actor = (string)$interaction['actor'];
+                            $host = (string)parse_url($actor, PHP_URL_HOST);
+                            $path = trim((string)parse_url($actor, PHP_URL_PATH), '/');
+                            $username = $path !== '' ? rawurldecode((string)basename($path)) : '';
+                            $label = $username !== '' && $host !== '' ? '@' . $username . '@' . $host : ($host ?: $actor);
+                            ?>
+                            <li>
+                                <a href="<?php echo $e($actor); ?>" target="_blank" rel="ugc nofollow noopener noreferrer"><?php echo $e($label); ?></a>
+                                <span><?php echo (string)$interaction['type'] === 'Like' ? _t('点赞') : _t('转发'); ?> · <?php echo $e(date('Y-m-d H:i', (int)$interaction['created'])); ?></span>
+                            </li>
+                        <?php endforeach; ?>
+                    </ul>
+                </details>
+            <?php endif; ?>
+        </section>
+        <style>
+        .fediverse-interactions{margin:28px 0 20px;padding:18px 0;border-top:1px solid var(--berry-border-color,rgba(0,0,0,.1));border-bottom:1px solid var(--berry-border-color,rgba(0,0,0,.1))}
+        .fediverse-interactions__header{display:flex;align-items:baseline;justify-content:space-between;gap:16px;margin-bottom:14px}
+        .fediverse-interactions__header h2{margin:0;font-size:16px;font-weight:700;letter-spacing:0}
+        .fediverse-interactions__header span{color:var(--berry-text-gray-lightest,rgba(0,0,0,.5));font-size:12px}
+        .fediverse-interactions__stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin:0}
+        .fediverse-interactions__stats div{display:flex;min-width:0;flex-direction:column}
+        .fediverse-interactions__stats dd{margin:0;color:var(--berry-text-color,rgba(0,0,0,.84));font-size:22px;font-variant-numeric:tabular-nums;line-height:1.3}
+        .fediverse-interactions__stats dt{order:2;color:var(--berry-text-gray,rgba(0,0,0,.6));font-size:12px}
+        .fediverse-interactions__details{margin-top:14px;border-top:1px solid var(--berry-border-color-light,rgba(0,0,0,.05));font-size:14px}
+        .fediverse-interactions__details summary{display:flex;align-items:center;min-height:40px;color:var(--berry-main-color,#5f4b8b);cursor:pointer;list-style-position:inside}
+        .fediverse-interactions__details summary::after{content:"+";margin-left:auto;font-size:18px}
+        .fediverse-interactions__details[open] summary::after{content:"-"}
+        .fediverse-interactions__details summary:focus-visible{outline:2px solid var(--berry-main-color,#5f4b8b);outline-offset:2px}
+        .fediverse-interactions__details ul{margin:0;padding:0;list-style:none}
+        .fediverse-interactions__details li{display:flex;align-items:baseline;justify-content:space-between;gap:16px;padding:7px 0;border-top:1px solid var(--berry-border-color-light,rgba(0,0,0,.05))}
+        .fediverse-interactions__details a{min-width:0;color:var(--berry-text-color,rgba(0,0,0,.84));overflow-wrap:anywhere}
+        .fediverse-interactions__details a:hover{color:var(--berry-hover-color,#654ea3);text-decoration:underline}
+        .fediverse-interactions__details li span{flex:0 0 auto;color:var(--berry-text-gray-lightest,rgba(0,0,0,.5));font-size:12px}
+        .fediverse-comment-source{display:inline-flex;align-items:center;margin-left:6px;padding:0 5px;border:1px solid var(--berry-border-color,rgba(0,0,0,.1));border-radius:3px;color:var(--berry-text-gray,rgba(0,0,0,.6));font-size:10px;font-weight:400;line-height:18px;vertical-align:middle}
+        @media(max-width:600px){.fediverse-interactions{margin-top:22px}.fediverse-interactions__details li{align-items:flex-start;flex-direction:column;gap:2px}}
+        </style>
+        <?php
     }
 
     public static function publishPost($contents, $widget)

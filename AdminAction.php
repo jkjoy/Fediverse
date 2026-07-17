@@ -55,10 +55,13 @@ class Fediverse_AdminAction extends Typecho_Widget implements Widget_Interface_D
             $this->notice(_t('操作失败：%s', $e->getMessage()), 'error');
         }
 
-        $this->response->redirect(Typecho_Common::url(
-            'extending.php?panel=Fediverse%2Fmanage.php',
-            Typecho_Widget::widget('Widget_Options')->adminUrl
-        ));
+        $views = array('overview', 'queue', 'followers', 'activities');
+        $view = (string)$this->request->get('view', 'overview');
+        $query = 'extending.php?panel=Fediverse%2Fmanage.php';
+        if (in_array($view, $views, true) && $view !== 'overview') {
+            $query .= '&view=' . rawurlencode($view);
+        }
+        $this->response->redirect(Typecho_Common::url($query, Typecho_Widget::widget('Widget_Options')->adminUrl));
     }
 
     private function ids($name)

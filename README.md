@@ -2,7 +2,7 @@
 
 Fediverse 是面向 Typecho 1.3.0 的多作者 ActivityPub 插件。每位 Typecho 作者拥有独立联邦账号、独立 RSA 密钥、收件箱、发件箱和关注者集合。
 
-当前版本：`0.2.1`（MVP）
+当前版本：`0.3.0`
 
 ## 功能
 
@@ -10,7 +10,7 @@ Fediverse 是面向 Typecho 1.3.0 的多作者 ActivityPub 插件。每位 Typec
 - ActivityPub `Person` Actor，每位作者独立账号和密钥
 - 文章发布、更新、删除的 `Create`、`Update`、`Delete` 投递
 - `Follow`、`Accept` 和 `Undo Follow`
-- Mastodon、Misskey 等远端回复写入 Typecho 评论审核队列
+- Mastodon、Misskey 等远端回复写入 Typecho 评论审核队列，并同步处理远端编辑与删除
 - HTTP Signatures、Digest、Date 验证和活动去重
 - 后台投递队列、指数退避和最多 8 次重试
 - “管理 → 联邦宇宙”运行状态页
@@ -40,6 +40,8 @@ Fediverse 是面向 Typecho 1.3.0 的多作者 ActivityPub 插件。每位 Typec
 从 `0.1.0` 升级时直接覆盖插件目录，然后先停用再重新启用一次插件，以注册后台管理面板和管理 Action。原有密钥、关注者和队列数据不会被删除。
 
 从 `0.2.0` 升级到 `0.2.1` 时必须完整覆盖插件目录，确认新增的 `bootstrap.php` 已上传。若服务器启用了 PHP OPcache，覆盖后重载 PHP-FPM 或在 Typecho 中停用再启用插件一次。
+
+从 `0.2.1` 升级到 `0.3.0` 无需迁移数据表，完整覆盖插件目录即可。文章详情互动区需要主题主动调用渲染函数，具体修改见“主题适配”。
 
 停用插件不会删除数据表和私钥，以免重新启用后联邦身份发生变化。需要永久卸载时，请先备份，再手工删除名称以 `fediverse_` 开头的数据表。
 
@@ -90,9 +92,56 @@ Cron 每次会处理插件设置中指定数量的投递任务，并清理超过
 - 每位作者的联邦地址、Actor 状态和密钥生成时间
 - 当前关注者及其共享收件箱
 - 等待投递和已停止重试的任务
-- 最近接收的 Follow、Create、Like、Announce 等活动
+- 最近接收的关注、回复、点赞、转发等活动及其处理状态
 
-后台支持立即处理当前批次、重新投递失败任务、删除无效任务、移除关注者、批量生成作者身份和清理过期活动。所有管理操作均要求管理员权限并通过 Typecho 安全令牌校验。
+后台支持立即处理当前批次、重新投递失败任务、删除无效任务、移除关注者、批量生成作者身份和清理过期活动。联邦地址及端点可直接复制，操作完成后会保留当前视图。所有管理操作均要求管理员权限并通过 Typecho 安全令牌校验。
+
+## 主题适配
+
+插件不会全局改写文章正文。主题需要在文章详情模板中调用渲染函数，才能显示联邦点赞、转发、已审核回复数量和最近互动者。当前站点的 Berry 主题包含以下两处修改；更新或更换主题后需要重新应用。
+
+### 显示文章互动区
+
+在主题的 `post.php` 中找到文章正文或标签列表结束的位置，将下面代码放在上一篇/下一篇导航或评论区之前。这里的 `$this` 必须是当前文章的 `Widget_Archive`：
+
+```php
+<?php if (class_exists('Fediverse_Plugin')): ?>
+    <?php Fediverse_Plugin::renderPostInteractions($this); ?>
+<?php endif; ?>
+```
+
+Berry 主题当前把它放在 `.tag-list` 结束后、`post-navigation` 之前。`class_exists` 检查确保插件停用后主题仍能正常渲染。渲染函数自带作用域为 `.fediverse-interactions` 的样式，并优先使用 Berry 的 CSS 变量；其他主题没有这些变量时会使用内置回退颜色。
+
+如果主题需要完全自定义 HTML，可以只获取结构化数据：
+
+```php
+<?php
+$interactions = class_exists('Fediverse_Plugin')
+    ? Fediverse_Plugin::postInteractions((int)$this->cid)
+    : array('likes' => 0, 'announces' => 0, 'replies' => 0, 'recent' => array());
+?>
+```
+
+返回字段：
+
+- `likes`：尚未撤销的远端点赞活动数量。
+- `announces`：尚未撤销的远端转发活动数量。
+- `replies`：已经在 Typecho 后台审核通过的联邦回复数量。
+- `recent`：最多 12 条最近点赞或转发记录，每项包含 `type`、`actor` 和 `created`。
+
+待审核、已忽略、已删除或已撤销的活动不会计入公开统计。远端回复本身仍由 Typecho 原生评论列表输出，互动区只显示数量，不会重复渲染评论正文。
+
+### 标记联邦回复
+
+如需在原生评论列表中区分远端回复，在主题 `comments.php` 的单条评论回调中，紧跟评论作者名称加入：
+
+```php
+<?php if ((string)$comments->agent === 'ActivityPub'): ?>
+    <span class="fediverse-comment-source">联邦宇宙</span>
+<?php endif; ?>
+```
+
+Berry 主题将这段代码放在 `threadedComments($comments, $options)` 的作者名称之后。其他主题若使用不同的评论回调函数，应放到对应的评论作者区域。调用 `renderPostInteractions()` 时已经包含 `.fediverse-comment-source` 样式；若只使用 `postInteractions()` 自定义互动区，则主题也需要自行定义该标记的样式。
 
 ## 联邦账号规则
 

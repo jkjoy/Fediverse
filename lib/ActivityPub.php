@@ -191,11 +191,18 @@ class Fediverse_ActivityPub
                 $commentId = self::createReply($activity, $user, $actorId);
                 $status = $commentId ? 'comment:' . $commentId : 'ignored';
                 break;
+            case 'Update':
+                $commentId = self::updateReply($activity, $user, $actorId);
+                $status = $commentId ? 'comment:' . $commentId : 'ignored';
+                break;
             case 'Delete':
                 self::deleteReply($objectId, $actorId);
                 break;
             case 'Like':
             case 'Announce':
+                if (!self::isLocalObjectForUser($objectId, $user)) {
+                    $status = 'ignored';
+                }
                 break;
             default:
                 $status = 'ignored';
@@ -252,10 +259,22 @@ class Fediverse_ActivityPub
     {
         $object = $activity['object'] ?? null;
         $type = is_array($object) ? (string)($object['type'] ?? '') : '';
+        $activityId = self::objectId($object);
+        $db = Typecho_Db::get();
+        $original = $activityId !== '' ? $db->fetchRow($db->select('type', 'object_id')->from(Fediverse_Database::table('activities'))
+            ->where('activity_id = ?', $activityId)->where('actor = ?', $actorId)->limit(1)) : null;
+        if ($type === '' && $original) {
+            $type = (string)$original['type'];
+        }
         if ($type === 'Follow') {
-            $db = Typecho_Db::get();
             $db->query($db->delete(Fediverse_Database::table('followers'))
                 ->where('uid = ?', (int)$user['uid'])->where('actor = ?', $actorId));
+        }
+        if ($type === 'Create' && $original) {
+            self::deleteReply((string)$original['object_id'], $actorId);
+        } elseif ($activityId !== '' && in_array($type, array('Follow', 'Like', 'Announce'), true)) {
+            $db->query($db->update(Fediverse_Database::table('activities'))->rows(array('status' => 'undone'))
+                ->where('activity_id = ?', $activityId)->where('actor = ?', $actorId));
         }
     }
 
@@ -279,6 +298,10 @@ class Fediverse_ActivityPub
         if ($attributedTo !== '' && rtrim($attributedTo, '/') !== rtrim($actorId, '/')) {
             throw new InvalidArgumentException('Reply attribution does not match activity actor');
         }
+        $existingCommentId = self::commentIdForObject($objectId, $actorId);
+        if ($existingCommentId) {
+            return $existingCommentId;
+        }
         $cid = self::cidForObject($replyTo);
         if (!$cid) {
             return 0;
@@ -289,10 +312,7 @@ class Fediverse_ActivityPub
         if (!$post || (int)$post['authorId'] !== (int)$user['uid'] || !(int)$post['allowComment']) {
             return 0;
         }
-        $name = trim((string)($object['attributedTo']['name'] ?? $object['name'] ?? ''));
-        if ($name === '') {
-            $name = parse_url($actorId, PHP_URL_HOST) ?: 'Fediverse';
-        }
+        $name = self::replyAuthorName($object, $actorId);
         $text = self::plainText((string)($object['content'] ?? ''));
         if ($text === '') {
             return 0;
@@ -315,6 +335,40 @@ class Fediverse_ActivityPub
         ));
     }
 
+    private static function updateReply($activity, $user, $actorId)
+    {
+        if ((string)Fediverse_Core::setting('acceptReplies', '1') !== '1') {
+            return 0;
+        }
+        $object = $activity['object'] ?? null;
+        if (!is_array($object) || !in_array((string)($object['type'] ?? ''), array('Note', 'Article'), true)) {
+            return 0;
+        }
+        $objectId = (string)($object['id'] ?? '');
+        $attributedTo = is_array($object['attributedTo'] ?? null)
+            ? (string)($object['attributedTo']['id'] ?? '')
+            : (string)($object['attributedTo'] ?? '');
+        if (!self::isHttpsId($objectId) || ($attributedTo !== '' && rtrim($attributedTo, '/') !== rtrim($actorId, '/'))) {
+            return 0;
+        }
+        $commentId = self::commentIdForObject($objectId, $actorId);
+        if (!$commentId) {
+            return 0;
+        }
+        $text = self::plainText((string)($object['content'] ?? ''));
+        if ($text === '') {
+            return 0;
+        }
+        $comments = Typecho_Widget::widget('Widget_Abstract_Comments@fediverse_update');
+        $comments->update(array(
+            'author' => self::replyAuthorName($object, $actorId),
+            'url' => $actorId,
+            'text' => $text,
+            'status' => 'waiting'
+        ), Typecho_Db::get()->sql()->where('coid = ?', $commentId));
+        return $commentId;
+    }
+
     private static function deleteReply($objectId, $actorId)
     {
         if ($objectId === '') {
@@ -326,7 +380,54 @@ class Fediverse_ActivityPub
         if ($row && preg_match('/^comment:(\d+)$/', (string)$row['status'], $matches)) {
             $comments = Typecho_Widget::widget('Widget_Abstract_Comments@fediverse_delete');
             $comments->delete($db->sql()->where('coid = ?', (int)$matches[1]));
+            $db->query($db->update(Fediverse_Database::table('activities'))->rows(array('status' => 'deleted'))
+                ->where('object_id = ?', $objectId)->where('actor = ?', $actorId)
+                ->where('status LIKE ?', 'comment:%'));
         }
+    }
+
+    private static function commentIdForObject($objectId, $actorId)
+    {
+        if ($objectId === '') {
+            return 0;
+        }
+        $db = Typecho_Db::get();
+        $row = $db->fetchRow($db->select('status')->from(Fediverse_Database::table('activities'))
+            ->where('object_id = ?', $objectId)->where('actor = ?', $actorId)
+            ->where('status LIKE ?', 'comment:%')->order('aid', Typecho_Db::SORT_DESC)->limit(1));
+        return $row && preg_match('/^comment:(\d+)$/', (string)$row['status'], $matches)
+            ? (int)$matches[1]
+            : 0;
+    }
+
+    private static function replyAuthorName($object, $actorId)
+    {
+        $attributedTo = $object['attributedTo'] ?? null;
+        $name = is_array($attributedTo)
+            ? trim((string)($attributedTo['name'] ?? $attributedTo['preferredUsername'] ?? ''))
+            : '';
+        if ($name === '') {
+            $name = trim((string)($object['name'] ?? ''));
+        }
+        if ($name === '') {
+            $path = trim((string)parse_url($actorId, PHP_URL_PATH), '/');
+            $username = $path !== '' ? rawurldecode((string)basename($path)) : '';
+            $host = (string)parse_url($actorId, PHP_URL_HOST);
+            $name = $username !== '' && $host !== '' ? '@' . $username . '@' . $host : ($host ?: 'Fediverse');
+        }
+        return Typecho_Common::subStr($name, 0, 150, '');
+    }
+
+    private static function isLocalObjectForUser($objectId, $user)
+    {
+        $cid = self::cidForObject($objectId);
+        if (!$cid) {
+            return false;
+        }
+        $db = Typecho_Db::get();
+        $post = $db->fetchRow($db->select('authorId')->from('table.contents')
+            ->where('cid = ?', $cid)->where('type = ?', 'post')->where('status = ?', 'publish')->limit(1));
+        return $post && (int)$post['authorId'] === (int)$user['uid'];
     }
 
     private static function targetUser($activity)
@@ -340,19 +441,44 @@ class Fediverse_ActivityPub
                 }
             }
         }
-        $object = self::objectId($activity['object'] ?? null);
+        $activityObject = $activity['object'] ?? null;
+        $object = self::objectId($activityObject);
         if ($object !== '') {
             $targets[] = $object;
         }
+        if (is_array($activityObject)) {
+            $nestedObject = self::objectId($activityObject['object'] ?? null);
+            if ($nestedObject !== '') {
+                $targets[] = $nestedObject;
+            }
+            foreach (array('to', 'cc') as $field) {
+                $values = $activityObject[$field] ?? array();
+                foreach (is_array($values) ? $values : array($values) as $value) {
+                    if (is_string($value)) {
+                        $targets[] = $value;
+                    }
+                }
+            }
+        }
         foreach ($targets as $target) {
-            if (preg_match('~/fediverse/author/([A-Za-z0-9_-]+)(?:/|$)~', $target, $matches)) {
+            $actorPrefix = rtrim(Fediverse_Core::baseUrl(), '/') . '/fediverse/author/';
+            if (str_starts_with($target, $actorPrefix)
+                && preg_match('/^([A-Za-z0-9_-]+)(?:\/|$)/', substr($target, strlen($actorPrefix)), $matches)) {
                 $user = Fediverse_Core::userByUsername($matches[1]);
                 if ($user) {
                     return $user;
                 }
             }
+            $cid = self::cidForObject($target);
+            if ($cid) {
+                $db = Typecho_Db::get();
+                $post = $db->fetchRow($db->select('authorId')->from('table.contents')->where('cid = ?', $cid)->limit(1));
+                if ($post) {
+                    return Fediverse_Core::userById((int)$post['authorId']);
+                }
+            }
         }
-        $cid = self::cidForObject((string)($activity['object']['inReplyTo'] ?? ''));
+        $cid = self::cidForObject(is_array($activityObject) ? (string)($activityObject['inReplyTo'] ?? '') : '');
         if ($cid) {
             $db = Typecho_Db::get();
             $post = $db->fetchRow($db->select('authorId')->from('table.contents')->where('cid = ?', $cid)->limit(1));
@@ -363,12 +489,14 @@ class Fediverse_ActivityPub
 
     private static function cidForObject($id)
     {
-        if (preg_match('~/fediverse/post/(\d+)(?:/|$)~', (string)$id, $matches)) {
+        $id = (string)$id;
+        $prefix = rtrim(Fediverse_Core::baseUrl(), '/') . '/fediverse/post/';
+        if (str_starts_with($id, $prefix) && preg_match('/^(\d+)(?:\/|$)/', substr($id, strlen($prefix)), $matches)) {
             return (int)$matches[1];
         }
         $db = Typecho_Db::get();
         $row = $db->fetchRow($db->select('cid')->from(Fediverse_Database::table('posts'))
-            ->where('object_id = ?', (string)$id)->limit(1));
+            ->where('object_id = ?', $id)->limit(1));
         return $row ? (int)$row['cid'] : 0;
     }
 
