@@ -89,7 +89,7 @@ $activityTypeLabel = static function ($type) {
 $activityStatus = static function ($status) {
     $status = (string)$status;
     if (preg_match('/^comment:(\d+)$/', $status, $matches)) {
-        return array(_t('待审核评论 #%d', (int)$matches[1]), 'warn', (int)$matches[1]);
+        return array(_t('联邦评论 #%d', (int)$matches[1]), '', (int)$matches[1]);
     }
     $labels = array(
         'accepted' => array(_t('已接收'), '', 0),
@@ -191,6 +191,8 @@ html{-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
                 <div class="fed-actions">
                     <a class="btn btn-s primary fed-action" data-busy="<?php _e('正在处理…'); ?>" href="<?php echo $e($actionUrl('do=run-queue', 'queue')); ?>"><?php _e('立即处理队列'); ?></a>
                     <a class="btn btn-s fed-action" data-busy="<?php _e('正在生成…'); ?>" href="<?php echo $e($actionUrl('do=provision-actors', 'overview')); ?>"><?php _e('生成作者身份'); ?></a>
+                    <a class="btn btn-s fed-action" data-busy="<?php _e('正在同步…'); ?>" href="<?php echo $e($actionUrl('do=broadcast-profiles', 'queue')); ?>"><?php _e('同步作者资料'); ?></a>
+                    <a class="btn btn-s fed-action" data-busy="<?php _e('正在补发…'); ?>" data-confirm="<?php _e('确认向现有关注者重新投递最近 20 篇公开文章吗？'); ?>" href="<?php echo $e($actionUrl('do=resend-recent-posts', 'queue')); ?>"><?php _e('补发最近文章'); ?></a>
                     <a class="btn btn-s fed-action operate-delete" data-busy="<?php _e('正在清理…'); ?>" data-confirm="<?php _e('确认清理超过保留天数的入站活动和时间轴内容吗？'); ?>" href="<?php echo $e($actionUrl('do=prune-activities', 'activities')); ?>"><?php _e('清理过期内容'); ?></a>
                     <span class="fed-spacer"></span>
                     <a href="<?php echo $e(Typecho_Common::url('options-plugin.php?config=Fediverse', $options->adminUrl)); ?>"><?php _e('插件设置'); ?></a>

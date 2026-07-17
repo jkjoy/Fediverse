@@ -9,6 +9,7 @@ class Fediverse_Queue
     public static function enqueuePost($cid, $operation)
     {
         $cid = (int)$cid;
+        $forceCreate = $operation === 'resend';
         $db = Typecho_Db::get();
         $postTable = Fediverse_Database::table('posts');
         $tracked = $db->fetchRow($db->select()->from($postTable)->where('cid = ?', $cid)->limit(1));
@@ -18,7 +19,7 @@ class Fediverse_Queue
             $uid = (int)($tracked['uid'] ?? $row['authorId'] ?? 0);
             $actor = $uid ? Fediverse_Core::actorByUid($uid) : null;
             if (!$actor) {
-                return;
+                return 0;
             }
             $objectId = (string)($tracked['object_id'] ?? Fediverse_Core::objectUrl($cid));
             $activity = array(
@@ -29,26 +30,26 @@ class Fediverse_Queue
                 'to' => array(Fediverse_ActivityPub::PUBLIC_AUDIENCE),
                 'object' => array('id' => $objectId, 'type' => 'Tombstone')
             );
-            self::fanOut($uid, $activity);
+            $deliveries = self::fanOut($uid, $activity);
             $db->query($db->delete($postTable)->where('cid = ?', $cid));
-            return;
+            return $deliveries;
         }
 
         $note = Fediverse_ActivityPub::noteForPost($cid);
         if (!$note) {
-            return;
+            return 0;
         }
         $row = $db->fetchRow($db->select('authorId')->from('table.contents')->where('cid = ?', $cid)->limit(1));
         $uid = (int)$row['authorId'];
         $actor = Fediverse_Core::actorByUid($uid);
         if (!$actor) {
-            return;
+            return 0;
         }
         $hash = hash('sha256', Fediverse_Core::json($note));
-        if ($tracked && hash_equals((string)$tracked['content_hash'], $hash)) {
-            return;
+        if (!$forceCreate && $tracked && hash_equals((string)$tracked['content_hash'], $hash)) {
+            return 0;
         }
-        $type = $tracked ? 'Update' : 'Create';
+        $type = $forceCreate ? 'Create' : ($tracked ? 'Update' : 'Create');
         $activity = array(
             '@context' => Fediverse_ActivityPub::CONTEXT,
             'id' => Fediverse_Core::activityId(strtolower($type) . '-' . $cid),
@@ -59,7 +60,7 @@ class Fediverse_Queue
             'cc' => $note['cc'],
             'object' => $note
         );
-        self::fanOut($uid, $activity);
+        $deliveries = self::fanOut($uid, $activity);
         if ($tracked) {
             $db->query($db->update($postTable)->rows(array(
                 'object_id' => $note['id'], 'content_hash' => $hash, 'updated' => time()
@@ -70,6 +71,50 @@ class Fediverse_Queue
                 'published' => time(), 'updated' => time()
             )));
         }
+        return $deliveries;
+    }
+
+    public static function enqueueActorUpdate($uid)
+    {
+        $uid = (int)$uid;
+        $user = Fediverse_Core::userById($uid);
+        if (!$user || !Fediverse_Core::userEnabled($uid)) {
+            return 0;
+        }
+        return self::fanOut($uid, Fediverse_ActivityPub::actorUpdate($user));
+    }
+
+    public static function broadcastActorUpdates()
+    {
+        $db = Typecho_Db::get();
+        $rows = $db->fetchAll($db->select('uid')->from(Fediverse_Database::table('actors'))
+            ->order('uid', Typecho_Db::SORT_ASC));
+        $result = array('authors' => 0, 'deliveries' => 0);
+        foreach ($rows as $row) {
+            $uid = (int)$row['uid'];
+            if (!Fediverse_Core::userEnabled($uid)) {
+                continue;
+            }
+            $result['authors']++;
+            $result['deliveries'] += self::enqueueActorUpdate($uid);
+        }
+        return $result;
+    }
+
+    public static function resendRecentPosts($limit = 20)
+    {
+        $limit = max(1, min(100, (int)$limit));
+        $db = Typecho_Db::get();
+        $rows = $db->fetchAll($db->select('cid')->from('table.contents')
+            ->where('type = ?', 'post')->where('status = ?', 'publish')
+            ->where("password IS NULL OR password = ''")
+            ->order('created', Typecho_Db::SORT_DESC)->limit($limit));
+        $result = array('posts' => 0, 'deliveries' => 0);
+        foreach ($rows as $row) {
+            $result['posts']++;
+            $result['deliveries'] += self::enqueuePost((int)$row['cid'], 'resend');
+        }
+        return $result;
     }
 
     public static function enqueueDelivery($uid, $inbox, $activity)
@@ -181,6 +226,7 @@ class Fediverse_Queue
         foreach (array_keys($inboxes) as $inbox) {
             self::enqueueDelivery((int)$uid, $inbox, $activity);
         }
+        return count($inboxes);
     }
 
     private static function normalizeIds($ids)

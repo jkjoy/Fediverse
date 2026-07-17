@@ -122,11 +122,37 @@ class Fediverse_Core
         if (!$row || !isset($row['value'])) {
             return array();
         }
-        $value = @unserialize((string)$row['value']);
-        if (!is_array($value)) {
-            $value = json_decode((string)$row['value'], true);
+        $raw = (string)$row['value'];
+        $value = json_decode($raw, true);
+        if (!is_array($value) && preg_match('/^a:\\d+:/', $raw)) {
+            $value = @unserialize($raw, array('allowed_classes' => false));
         }
         return is_array($value) ? $value : array();
+    }
+
+    public static function savePersonalSettings($uid, $settings)
+    {
+        $uid = (int)$uid;
+        $settings = is_array($settings) ? $settings : array();
+        $db = Typecho_Db::get();
+        $name = '_plugin:Fediverse';
+        $row = $db->fetchRow($db->select('name')->from('table.options')
+            ->where('name = ?', $name)->where('user = ?', $uid)->limit(1));
+        $value = self::json($settings);
+        if ($row) {
+            $db->query($db->update('table.options')->rows(array('value' => $value))
+                ->where('name = ?', $name)->where('user = ?', $uid));
+        } else {
+            $db->query($db->insert('table.options')->rows(array(
+                'name' => $name,
+                'value' => $value,
+                'user' => $uid
+            )));
+        }
+        if ($uid > 0) {
+            $db->query($db->update(Fediverse_Database::table('actors'))->rows(array('modified' => time()))
+                ->where('uid = ?', $uid));
+        }
     }
 
     public static function userEnabled($uid)

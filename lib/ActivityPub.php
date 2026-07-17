@@ -39,6 +39,8 @@ class Fediverse_ActivityPub
             'preferredUsername' => $username,
             'name' => (string)($user['screenName'] ?: $user['name']),
             'summary' => '<p>' . htmlspecialchars($summary, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . '</p>',
+            'published' => Fediverse_Core::iso8601((int)$actor['created']),
+            'updated' => Fediverse_Core::iso8601((int)$actor['modified']),
             'url' => $url,
             'inbox' => $id . '/inbox',
             'outbox' => $id . '/outbox',
@@ -87,6 +89,22 @@ class Fediverse_ActivityPub
         }
 
         return $document;
+    }
+
+    public static function actorUpdate($user)
+    {
+        $object = self::actor($user);
+        $actorId = (string)$object['id'];
+        return array(
+            '@context' => self::CONTEXT,
+            'id' => Fediverse_Core::activityId('update-actor'),
+            'type' => 'Update',
+            'actor' => $actorId,
+            'published' => Fediverse_Core::iso8601(time()),
+            'to' => array(self::PUBLIC_AUDIENCE),
+            'cc' => array($actorId . '/followers'),
+            'object' => $object
+        );
     }
 
     private static function httpsUrl($value)

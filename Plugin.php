@@ -13,7 +13,7 @@ require_once __DIR__ . '/AdminAction.php';
  *
  * @package Fediverse
  * @author Typecho Community
- * @version 0.5.2
+ * @version 0.5.3
  * @link https://www.w3.org/TR/activitypub/
  */
 class Fediverse_Plugin implements Typecho_Plugin_Interface
@@ -237,6 +237,15 @@ class Fediverse_Plugin implements Typecho_Plugin_Interface
         }
     }
 
+    public static function personalConfigHandle($settings, $isInit)
+    {
+        $uid = $isInit ? 0 : (int)Typecho_Widget::widget('Widget_User')->uid;
+        Fediverse_Core::savePersonalSettings($uid, $settings);
+        if (!$isInit && $uid > 0) {
+            Fediverse_Queue::enqueueActorUpdate($uid);
+        }
+    }
+
     public static function postInteractions($cid)
     {
         $cid = (int)$cid;
@@ -348,7 +357,7 @@ class Fediverse_Plugin implements Typecho_Plugin_Interface
 
     public static function publishPost($contents, $widget)
     {
-        if (!Fediverse_Core::isEnabled() || !isset($widget->cid) || $widget->status !== 'publish') {
+        if (!Fediverse_Core::isEnabled() || !isset($widget->cid)) {
             return;
         }
 

@@ -45,6 +45,22 @@ class Fediverse_AdminAction extends Typecho_Widget implements Widget_Interface_D
                     $count = $this->provisionActors();
                     $this->notice(_t('作者联邦身份检查完成，新生成 %d 个身份。', $count), 'success');
                     break;
+                case 'broadcast-profiles':
+                    $result = Fediverse_Queue::broadcastActorUpdates();
+                    $this->notice(_t(
+                        '已同步 %d 位作者资料，生成 %d 个投递任务。',
+                        (int)$result['authors'],
+                        (int)$result['deliveries']
+                    ), 'success');
+                    break;
+                case 'resend-recent-posts':
+                    $result = Fediverse_Queue::resendRecentPosts(20);
+                    $this->notice(_t(
+                        '已补发最近 %d 篇文章，生成 %d 个投递任务。',
+                        (int)$result['posts'],
+                        (int)$result['deliveries']
+                    ), 'success');
+                    break;
                 case 'prune-activities':
                     $activities = Fediverse_ActivityPub::pruneLogs();
                     $timeline = Fediverse_Client::pruneTimeline();
