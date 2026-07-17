@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.2
+
+- 联邦 Actor、活动、对象和签名 keyId 固定使用插件配置的规范联邦域名，避免通过 `www` 或其他 Host 运行 Cron 时产生第二套身份。
+- 修复 Pleroma 宽松接受动态 Host Actor、但 Mastodon 因 Actor 与 WebFinger 规范 ID 不一致而持续等待确认的问题。
+
 ## 0.4.1
 
 - WebFinger 与 Actor JSON 请求支持最多 5 次安全 HTTPS 重定向，每一跳重新校验 DNS 和公网 IP，兼容使用规范域名跳转的 GoToSocial 实例。

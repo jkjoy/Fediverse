@@ -50,7 +50,9 @@ class Fediverse_Core
 
     public static function baseUrl()
     {
-        return rtrim((string)self::options()->index, '/');
+        $index = parse_url((string)self::options()->index);
+        $path = is_array($index) ? (string)($index['path'] ?? '') : '';
+        return rtrim(self::origin() . '/' . ltrim($path, '/'), '/');
     }
 
     public static function origin()
