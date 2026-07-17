@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.3
+
+- 构建文章 ActivityPub 对象时隔离并丢弃主题或内容插件的意外输出，修复 Outbox 和单篇对象被 UTF-8 BOM 污染后 Mastodon 无法解析文章的问题。
+
 ## 0.4.2
 
 - 联邦 Actor、活动、对象和签名 keyId 固定使用插件配置的规范联邦域名，避免通过 `www` 或其他 Host 运行 Cron 时产生第二套身份。

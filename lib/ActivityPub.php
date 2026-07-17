@@ -73,12 +73,20 @@ class Fediverse_ActivityPub
 
     public static function noteForPost($cid)
     {
-        $widget = Typecho_Widget::widget(
-            'Widget_Archive@fediverse_' . (int)$cid,
-            'type=single',
-            array('cid' => (int)$cid),
-            false
-        );
+        $bufferLevel = ob_get_level();
+        ob_start();
+        try {
+            $widget = Typecho_Widget::widget(
+                'Widget_Archive@fediverse_' . (int)$cid,
+                'type=single',
+                array('cid' => (int)$cid),
+                false
+            );
+        } finally {
+            while (ob_get_level() > $bufferLevel) {
+                ob_end_clean();
+            }
+        }
         if (!$widget || !$widget->have() || $widget->type !== 'post' || $widget->status !== 'publish' || !empty($widget->password)) {
             return null;
         }
