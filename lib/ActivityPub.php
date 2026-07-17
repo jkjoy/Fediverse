@@ -8,6 +8,7 @@ class Fediverse_ActivityPub
 {
     public const CONTEXT = 'https://www.w3.org/ns/activitystreams';
     public const PUBLIC_AUDIENCE = 'https://www.w3.org/ns/activitystreams#Public';
+    private const REMOTE_COMMENT_STATUS = 'approved';
 
     public static function actor($user)
     {
@@ -433,7 +434,7 @@ class Fediverse_ActivityPub
         if (!$post || (int)$post['authorId'] !== (int)$user['uid'] || !(int)$post['allowComment']) {
             return 0;
         }
-        $name = self::replyAuthorName($object, $actorId);
+        $name = self::replyAuthorName($activity, $object, $actorId);
         $text = self::plainText((string)($object['content'] ?? ''));
         if ($text === '') {
             return 0;
@@ -451,7 +452,7 @@ class Fediverse_ActivityPub
             'agent' => 'ActivityPub',
             'text' => $text,
             'type' => 'comment',
-            'status' => 'waiting',
+            'status' => self::REMOTE_COMMENT_STATUS,
             'parent' => 0
         ));
     }
@@ -482,10 +483,10 @@ class Fediverse_ActivityPub
         }
         $comments = Typecho_Widget::widget('Widget_Abstract_Comments@fediverse_update');
         $comments->update(array(
-            'author' => self::replyAuthorName($object, $actorId),
+            'author' => self::replyAuthorName($activity, $object, $actorId),
             'url' => $actorId,
             'text' => $text,
-            'status' => 'waiting'
+            'status' => self::REMOTE_COMMENT_STATUS
         ), Typecho_Db::get()->sql()->where('coid = ?', $commentId));
         return $commentId;
     }
@@ -521,14 +522,37 @@ class Fediverse_ActivityPub
             : 0;
     }
 
-    private static function replyAuthorName($object, $actorId)
+    private static function replyAuthorName($activity, $object, $actorId)
     {
-        $attributedTo = $object['attributedTo'] ?? null;
-        $name = is_array($attributedTo)
-            ? trim((string)($attributedTo['name'] ?? $attributedTo['preferredUsername'] ?? ''))
+        $activityActor = $activity['actor'] ?? null;
+        $name = is_array($activityActor)
+            ? trim((string)($activityActor['name'] ?? ''))
             : '';
+        $attributedTo = $object['attributedTo'] ?? null;
         if ($name === '') {
-            $name = trim((string)($object['name'] ?? ''));
+            $name = is_array($attributedTo)
+                ? trim((string)($attributedTo['name'] ?? ''))
+                : '';
+        }
+
+        $username = '';
+        if ($name === '') {
+            try {
+                $actor = Fediverse_Client::resolveActor($actorId);
+                $name = trim((string)($actor['name'] ?? ''));
+                $username = trim((string)($actor['username'] ?? ''));
+            } catch (Throwable $e) {
+                // The signed reply is still valid when the remote profile cannot be fetched again.
+            }
+        }
+        if ($name === '') {
+            $username = $username !== '' ? $username : (is_array($activityActor)
+                ? trim((string)($activityActor['preferredUsername'] ?? ''))
+                : '');
+            $username = $username !== '' ? $username : (is_array($attributedTo)
+                ? trim((string)($attributedTo['preferredUsername'] ?? ''))
+                : '');
+            $name = $username;
         }
         if ($name === '') {
             $path = trim((string)parse_url($actorId, PHP_URL_PATH), '/');
@@ -536,7 +560,7 @@ class Fediverse_ActivityPub
             $host = (string)parse_url($actorId, PHP_URL_HOST);
             $name = $username !== '' && $host !== '' ? '@' . $username . '@' . $host : ($host ?: 'Fediverse');
         }
-        return Typecho_Common::subStr($name, 0, 150, '');
+        return Typecho_Common::subStr(self::plainText($name), 0, 150, '');
     }
 
     private static function isLocalObjectForUser($objectId, $user)

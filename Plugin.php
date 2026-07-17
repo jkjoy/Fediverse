@@ -13,7 +13,7 @@ require_once __DIR__ . '/AdminAction.php';
  *
  * @package Fediverse
  * @author Typecho Community
- * @version 0.5.1
+ * @version 0.5.2
  * @link https://www.w3.org/TR/activitypub/
  */
 class Fediverse_Plugin implements Typecho_Plugin_Interface
@@ -128,7 +128,7 @@ class Fediverse_Plugin implements Typecho_Plugin_Interface
 
         $comments = new Typecho_Widget_Helper_Form_Element_Radio(
             'acceptReplies',
-            array('1' => _t('接收并进入审核'), '0' => _t('不接收')),
+            array('1' => _t('接收并直接显示'), '0' => _t('不接收')),
             '1',
             _t('远端回复')
         );

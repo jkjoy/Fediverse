@@ -16,7 +16,7 @@ class Fediverse_Http
         for ($redirects = 0; ; $redirects++) {
             $response = self::request('GET', $currentUrl, array(
                 'Accept: ' . $accept,
-                'User-Agent: Typecho-Fediverse/0.5.1'
+                'User-Agent: Typecho-Fediverse/0.5.2'
             ));
             if (in_array($response['status'], array(301, 302, 303, 307, 308), true)) {
                 if ($redirects >= self::MAX_REDIRECTS) {
@@ -66,7 +66,7 @@ class Fediverse_Http
         $response = self::request('POST', $url, array(
             'Accept: application/activity+json',
             'Content-Type: application/activity+json',
-            'User-Agent: Typecho-Fediverse/0.5.1',
+            'User-Agent: Typecho-Fediverse/0.5.2',
             'Host: ' . $host,
             'Date: ' . $date,
             'Digest: ' . $digest,
