@@ -2,7 +2,7 @@
 
 Fediverse 是面向 Typecho 1.3.0 的多作者 ActivityPub 插件。每位 Typecho 作者拥有独立联邦账号、独立 RSA 密钥、收件箱、发件箱和关注者集合。
 
-当前版本：`0.5.3`
+当前版本：`0.5.4`
 
 ## 功能
 
@@ -63,6 +63,8 @@ Fediverse 是面向 Typecho 1.3.0 的多作者 ActivityPub 插件。每位 Typec
 从 `0.5.1` 升级到 `0.5.2` 无需迁移数据表。新接收及远端编辑的联邦回复会直接通过审核，并优先使用远端 Actor 的显示昵称作为评论作者；升级前已经处于待审核状态的评论不会自动改变。
 
 从 `0.5.2` 升级到 `0.5.3` 无需迁移数据表。作者保存个人 Fediverse 设置后会向关注者发送资料更新通知；文章发布会按数据库中的最终状态可靠入队。升级后可在“管理 → 联邦宇宙”使用“同步作者资料”和“补发最近文章”修复远端缓存及历史漏投，然后运行投递队列。
+
+从 `0.5.3` 升级到 `0.5.4` 无需迁移数据表。文章互动区改为不依赖具体主题变量的通用样式，并补充移动端、深色、高对比度、键盘焦点和减少动态效果支持；主题调用方式不变。
 
 停用插件不会删除数据表和私钥，以免重新启用后联邦身份发生变化。需要永久卸载时，请先备份，再手工删除名称以 `fediverse_` 开头的数据表。
 
@@ -150,7 +152,17 @@ Cron 每次会处理插件设置中指定数量的投递任务，并清理超过
 <?php endif; ?>
 ```
 
-Berry 主题当前把它放在 `.tag-list` 结束后、`post-navigation` 之前。`class_exists` 检查确保插件停用后主题仍能正常渲染。渲染函数自带作用域为 `.fediverse-interactions` 的样式，并优先使用 Berry 的 CSS 变量；其他主题没有这些变量时会使用内置回退颜色。
+Berry 主题当前把它放在 `.tag-list` 结束后、`post-navigation` 之前。`class_exists` 检查确保插件停用后主题仍能正常渲染。渲染函数自带完全限定在 `.fediverse-interactions` 内的通用样式，颜色和字体继承当前主题，并使用中性透明分隔线，因此无需识别主题名称或 CSS 变量。统计区在窄屏保持稳定三列，最近互动记录会自动改为单列并允许长账号地址换行。
+
+主题如需调整分隔线、弱化文字或键盘焦点颜色，可以在主题 CSS 中覆盖组件变量：
+
+```css
+.fediverse-interactions {
+    --fediverse-divider: rgba(127, 127, 127, .28);
+    --fediverse-muted-opacity: .62;
+    --fediverse-focus: currentColor;
+}
+```
 
 如果主题需要完全自定义 HTML，可以只获取结构化数据：
 
@@ -181,7 +193,7 @@ $interactions = class_exists('Fediverse_Plugin')
 <?php endif; ?>
 ```
 
-Berry 主题将这段代码放在 `threadedComments($comments, $options)` 的作者名称之后。其他主题若使用不同的评论回调函数，应放到对应的评论作者区域。调用 `renderPostInteractions()` 时已经包含 `.fediverse-comment-source` 样式；若只使用 `postInteractions()` 自定义互动区，则主题也需要自行定义该标记的样式。
+Berry 主题将这段代码放在 `threadedComments($comments, $options)` 的作者名称之后。其他主题若使用不同的评论回调函数，应放到对应的评论作者区域。调用 `renderPostInteractions()` 时已经包含通用的 `.fediverse-comment-source` 样式；标记会继承评论文字颜色，不依赖评论 DOM 结构。若只使用 `postInteractions()` 自定义互动区，则主题也需要自行定义该标记的样式。
 
 ## 联邦账号规则
 
