@@ -4,11 +4,16 @@ if (!defined('__TYPECHO_ROOT_DIR__')) {
     exit;
 }
 
+class Fediverse_InboundLimitException extends RuntimeException
+{
+}
+
 class Fediverse_ActivityPub
 {
     public const CONTEXT = 'https://www.w3.org/ns/activitystreams';
     public const PUBLIC_AUDIENCE = 'https://www.w3.org/ns/activitystreams#Public';
-    private const REMOTE_COMMENT_STATUS = 'approved';
+    private const REMOTE_COMMENT_STATUS = 'waiting';
+    private const INBOUND_RATE_WINDOW = 300;
 
     public static function actor($user)
     {
@@ -269,6 +274,7 @@ class Fediverse_ActivityPub
         if (self::activityExists($activity['id'])) {
             return array('duplicate' => true);
         }
+        self::enforceInboundLimits($actorId);
 
         $type = (string)$activity['type'];
         $user = $targetUsername !== null ? Fediverse_Core::userByUsername($targetUsername) : self::targetUser($activity);
@@ -308,7 +314,7 @@ class Fediverse_ActivityPub
                 $commentId = 0;
                 $timelineId = 0;
                 foreach ($recipientUsers as $recipientUser) {
-                    $createdComment = self::createReply($activity, $recipientUser, $actorId);
+                    $createdComment = self::createReply($activity, $recipientUser, $actorId, $request);
                     if ($createdComment) {
                         $commentId = $createdComment;
                     } else {
@@ -321,7 +327,7 @@ class Fediverse_ActivityPub
                 $commentId = 0;
                 $timelineId = 0;
                 foreach ($recipientUsers as $recipientUser) {
-                    $updatedComment = self::updateReply($activity, $recipientUser, $actorId);
+                    $updatedComment = self::updateReply($activity, $recipientUser, $actorId, $request);
                     if ($updatedComment) {
                         $commentId = $updatedComment;
                     } else {
@@ -348,6 +354,7 @@ class Fediverse_ActivityPub
                 $status = 'ignored';
         }
         self::recordActivity($activity, $actorId, $objectId, $status);
+        self::recordInbound($activity['id'], $actorId);
         return array('duplicate' => false, 'status' => $status);
     }
 
@@ -356,8 +363,11 @@ class Fediverse_ActivityPub
         $days = $days === null ? (int)Fediverse_Core::setting('activityRetentionDays', 90) : (int)$days;
         $days = max(7, min(3650, $days));
         $db = Typecho_Db::get();
-        return (int)$db->query($db->delete(Fediverse_Database::table('activities'))
-            ->where('created < ?', time() - ($days * 86400)));
+        $before = time() - ($days * 86400);
+        $count = (int)$db->query($db->delete(Fediverse_Database::table('activities'))
+            ->where('created < ?', $before));
+        $db->query($db->delete(Fediverse_Database::table('inbound'))->where('created < ?', $before));
+        return $count;
     }
 
     private static function follow($activity, $user, $actorId)
@@ -418,7 +428,7 @@ class Fediverse_ActivityPub
         }
     }
 
-    private static function createReply($activity, $user, $actorId)
+    private static function createReply($activity, $user, $actorId, $request)
     {
         if ((string)Fediverse_Core::setting('acceptReplies', '1') !== '1') {
             return 0;
@@ -457,8 +467,7 @@ class Fediverse_ActivityPub
         if ($text === '') {
             return 0;
         }
-        $comments = Typecho_Widget::widget('Widget_Abstract_Comments@fediverse_insert');
-        return (int)$comments->insert(array(
+        $comment = self::filterRemoteComment(array(
             'cid' => $cid,
             'created' => isset($object['published']) ? (strtotime((string)$object['published']) ?: time()) : time(),
             'author' => Typecho_Common::subStr($name, 0, 150, ''),
@@ -466,16 +475,18 @@ class Fediverse_ActivityPub
             'ownerId' => (int)$user['uid'],
             'mail' => '',
             'url' => $actorId,
-            'ip' => '0.0.0.0',
+            'ip' => (string)$request->getIp(),
             'agent' => 'ActivityPub',
             'text' => $text,
             'type' => 'comment',
             'status' => self::REMOTE_COMMENT_STATUS,
             'parent' => 0
-        ));
+        ), $cid);
+        $comments = Typecho_Widget::widget('Widget_Abstract_Comments@fediverse_insert');
+        return (int)$comments->insert($comment);
     }
 
-    private static function updateReply($activity, $user, $actorId)
+    private static function updateReply($activity, $user, $actorId, $request)
     {
         if ((string)Fediverse_Core::setting('acceptReplies', '1') !== '1') {
             return 0;
@@ -499,14 +510,67 @@ class Fediverse_ActivityPub
         if ($text === '') {
             return 0;
         }
-        $comments = Typecho_Widget::widget('Widget_Abstract_Comments@fediverse_update');
-        $comments->update(array(
+        $db = Typecho_Db::get();
+        $existing = $db->fetchRow($db->select()->from('table.comments')->where('coid = ?', $commentId)->limit(1));
+        if (!$existing) {
+            return 0;
+        }
+        $filtered = self::filterRemoteComment(array_replace($existing, array(
             'author' => self::replyAuthorName($activity, $object, $actorId),
             'url' => $actorId,
+            'ip' => (string)$request->getIp(),
+            'agent' => 'ActivityPub',
             'text' => $text,
             'status' => self::REMOTE_COMMENT_STATUS
-        ), Typecho_Db::get()->sql()->where('coid = ?', $commentId));
+        )), (int)$existing['cid']);
+        $comments = Typecho_Widget::widget('Widget_Abstract_Comments@fediverse_update');
+        $comments->update(array(
+            'author' => Typecho_Common::subStr((string)($filtered['author'] ?? ''), 0, 150, ''),
+            'mail' => (string)($filtered['mail'] ?? ''),
+            'url' => (string)($filtered['url'] ?? ''),
+            'ip' => (string)($filtered['ip'] ?? ''),
+            'agent' => (string)($filtered['agent'] ?? 'ActivityPub'),
+            'text' => (string)($filtered['text'] ?? ''),
+            'status' => (string)($filtered['status'] ?? self::REMOTE_COMMENT_STATUS)
+        ), $db->sql()->where('coid = ?', $commentId));
         return $commentId;
+    }
+
+    private static function filterRemoteComment($comment, $cid)
+    {
+        $bufferLevel = ob_get_level();
+        ob_start();
+        try {
+            $content = Typecho_Widget::widget(
+                'Widget_Archive@fediverse_comment_' . (int)$cid,
+                'type=single',
+                array('cid' => (int)$cid),
+                false
+            );
+        } finally {
+            while (ob_get_level() > $bufferLevel) {
+                ob_end_clean();
+            }
+        }
+        if (!$content || !$content->have()) {
+            throw new Error('Comment target widget is unavailable');
+        }
+        try {
+            $filtered = Typecho_Plugin::factory('Widget_Feedback')->filter('comment', $comment, $content);
+        } catch (Throwable $e) {
+            if ($e instanceof Typecho_Widget_Exception || $e instanceof Typecho\Exception) {
+                throw new InvalidArgumentException('Remote reply was rejected by a comment filter', 0, $e);
+            }
+            throw $e;
+        }
+        if (!is_array($filtered)) {
+            throw new Error('Comment filter must return an array');
+        }
+        $filtered['cid'] = (int)$cid;
+        $filtered['type'] = 'comment';
+        $filtered['agent'] = 'ActivityPub';
+        $filtered['status'] = (string)($filtered['status'] ?? self::REMOTE_COMMENT_STATUS);
+        return $filtered;
     }
 
     private static function deleteReply($objectId, $actorId)
@@ -667,6 +731,65 @@ class Fediverse_ActivityPub
         $row = $db->fetchRow($db->select('cid')->from(Fediverse_Database::table('posts'))
             ->where('object_id = ?', $id)->limit(1));
         return $row ? (int)$row['cid'] : 0;
+    }
+
+    private static function enforceInboundLimits($actorId)
+    {
+        $actorHash = hash('sha256', (string)$actorId);
+        $domain = self::sourceDomain($actorId);
+        $since = time() - self::INBOUND_RATE_WINDOW;
+        $checks = array(
+            array('actor_hash', $actorHash, 'inboundActorRateLimit', 30, $since, 'Actor activity rate limit exceeded'),
+            array('source_domain', $domain, 'inboundDomainRateLimit', 100, $since, 'Source domain activity rate limit exceeded'),
+            array('actor_hash', $actorHash, 'inboundActorStorageLimit', 2000, null, 'Actor activity storage quota exceeded'),
+            array('source_domain', $domain, 'inboundDomainStorageLimit', 10000, null, 'Source domain activity storage quota exceeded')
+        );
+        foreach ($checks as $check) {
+            $limit = self::inboundLimit($check[2], $check[3]);
+            if ($limit > 0 && self::inboundCount($check[0], $check[1], $check[4]) >= $limit) {
+                throw new Fediverse_InboundLimitException($check[5]);
+            }
+        }
+    }
+
+    private static function inboundLimit($name, $default)
+    {
+        return max(0, min(1000000, (int)Fediverse_Core::setting($name, $default)));
+    }
+
+    private static function inboundCount($field, $value, $since)
+    {
+        if (!in_array($field, array('actor_hash', 'source_domain'), true)) {
+            throw new InvalidArgumentException('Invalid inbound limit field');
+        }
+        $db = Typecho_Db::get();
+        $query = $db->select(array('COUNT(iid)' => 'num'))->from(Fediverse_Database::table('inbound'))
+            ->where($field . ' = ?', (string)$value);
+        if ($since !== null) {
+            $query->where('created >= ?', (int)$since);
+        }
+        $row = $db->fetchRow($query);
+        return (int)($row['num'] ?? 0);
+    }
+
+    private static function recordInbound($activityId, $actorId)
+    {
+        $db = Typecho_Db::get();
+        $db->query($db->insert(Fediverse_Database::table('inbound'))->rows(array(
+            'activity_hash' => hash('sha256', (string)$activityId),
+            'actor_hash' => hash('sha256', (string)$actorId),
+            'source_domain' => self::sourceDomain($actorId),
+            'created' => time()
+        )));
+    }
+
+    private static function sourceDomain($actorId)
+    {
+        $host = strtolower(rtrim((string)parse_url((string)$actorId, PHP_URL_HOST), '.'));
+        if ($host === '') {
+            throw new InvalidArgumentException('Activity actor domain is invalid');
+        }
+        return $host;
     }
 
     private static function activityExists($id)

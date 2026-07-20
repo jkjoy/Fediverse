@@ -45,6 +45,13 @@ class Fediverse_Database
             . '`status` varchar(16) NOT NULL, `created` int unsigned NOT NULL, '
             . 'PRIMARY KEY (`aid`), UNIQUE KEY `activity_hash` (`activity_hash`)'
             . ') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4');
+        $db->query('CREATE TABLE IF NOT EXISTS `' . $p . 'fediverse_inbound` ('
+            . '`iid` int unsigned NOT NULL AUTO_INCREMENT, `activity_hash` char(64) NOT NULL, '
+            . '`actor_hash` char(64) NOT NULL, `source_domain` varchar(255) NOT NULL, `created` int unsigned NOT NULL, '
+            . 'PRIMARY KEY (`iid`), UNIQUE KEY `activity_hash` (`activity_hash`), '
+            . 'KEY `actor_created` (`actor_hash`,`created`), KEY `domain_created` (`source_domain`,`created`), '
+            . 'KEY `created` (`created`)'
+            . ') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4');
         $db->query('CREATE TABLE IF NOT EXISTS `' . $p . 'fediverse_queue` ('
             . '`qid` int unsigned NOT NULL AUTO_INCREMENT, `uid` int unsigned NOT NULL, `inbox` varchar(512) NOT NULL, '
             . '`activity` longtext NOT NULL, `attempts` int unsigned NOT NULL DEFAULT 0, `available` int unsigned NOT NULL, '
@@ -91,6 +98,15 @@ class Fediverse_Database
             . '"aid" serial PRIMARY KEY, "activity_hash" char(64) NOT NULL UNIQUE, "activity_id" text NOT NULL, '
             . '"type" varchar(32) NOT NULL, "actor" text NOT NULL, "object_id" text, "payload" text NOT NULL, '
             . '"status" varchar(16) NOT NULL, "created" integer NOT NULL)');
+        $db->query('CREATE TABLE IF NOT EXISTS ' . $q('inbound') . ' ('
+            . '"iid" serial PRIMARY KEY, "activity_hash" char(64) NOT NULL UNIQUE, "actor_hash" char(64) NOT NULL, '
+            . '"source_domain" varchar(255) NOT NULL, "created" integer NOT NULL)');
+        $db->query('CREATE INDEX IF NOT EXISTS "' . $p . 'fediverse_inbound_actor_created" ON '
+            . $q('inbound') . ' ("actor_hash", "created")');
+        $db->query('CREATE INDEX IF NOT EXISTS "' . $p . 'fediverse_inbound_domain_created" ON '
+            . $q('inbound') . ' ("source_domain", "created")');
+        $db->query('CREATE INDEX IF NOT EXISTS "' . $p . 'fediverse_inbound_created" ON '
+            . $q('inbound') . ' ("created")');
         $db->query('CREATE TABLE IF NOT EXISTS ' . $q('queue') . ' ('
             . '"qid" serial PRIMARY KEY, "uid" integer NOT NULL, "inbox" varchar(512) NOT NULL, "activity" text NOT NULL, '
             . '"attempts" integer NOT NULL DEFAULT 0, "available" integer NOT NULL, "last_error" varchar(500), '
@@ -132,6 +148,15 @@ class Fediverse_Database
             . '`aid` INTEGER PRIMARY KEY AUTOINCREMENT, `activity_hash` char(64) NOT NULL UNIQUE, `activity_id` text NOT NULL, '
             . '`type` varchar(32) NOT NULL, `actor` text NOT NULL, `object_id` text, `payload` text NOT NULL, '
             . '`status` varchar(16) NOT NULL, `created` INTEGER NOT NULL)');
+        $db->query('CREATE TABLE IF NOT EXISTS ' . $q('inbound') . ' ('
+            . '`iid` INTEGER PRIMARY KEY AUTOINCREMENT, `activity_hash` char(64) NOT NULL UNIQUE, '
+            . '`actor_hash` char(64) NOT NULL, `source_domain` varchar(255) NOT NULL, `created` INTEGER NOT NULL)');
+        $db->query('CREATE INDEX IF NOT EXISTS `' . $p . 'fediverse_inbound_actor_created` ON '
+            . $q('inbound') . ' (`actor_hash`, `created`)');
+        $db->query('CREATE INDEX IF NOT EXISTS `' . $p . 'fediverse_inbound_domain_created` ON '
+            . $q('inbound') . ' (`source_domain`, `created`)');
+        $db->query('CREATE INDEX IF NOT EXISTS `' . $p . 'fediverse_inbound_created` ON '
+            . $q('inbound') . ' (`created`)');
         $db->query('CREATE TABLE IF NOT EXISTS ' . $q('queue') . ' ('
             . '`qid` INTEGER PRIMARY KEY AUTOINCREMENT, `uid` INTEGER NOT NULL, `inbox` varchar(512) NOT NULL, `activity` text NOT NULL, '
             . '`attempts` INTEGER NOT NULL DEFAULT 0, `available` INTEGER NOT NULL, `last_error` varchar(500), '

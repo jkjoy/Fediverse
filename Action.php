@@ -154,6 +154,8 @@ class Fediverse_Action extends Typecho_Widget
             $result = Fediverse_ActivityPub::receive($activity, $raw, $this->request, $username);
             $this->response->setStatus(202);
             $this->respond($result, 'application/json');
+        } catch (Fediverse_InboundLimitException $e) {
+            $this->error(429, $e->getMessage());
         } catch (InvalidArgumentException $e) {
             $this->error(400, $e->getMessage());
         } catch (RuntimeException $e) {

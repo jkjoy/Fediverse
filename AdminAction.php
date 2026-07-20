@@ -118,8 +118,17 @@ class Fediverse_AdminAction extends Typecho_Widget implements Widget_Interface_D
 
         $views = array('overview', 'queue', 'followers', 'following', 'timeline', 'activities');
         $view = (string)$this->request->get('view', 'overview');
-        $query = 'extending.php?panel=Fediverse%2Fmanage.php';
-        if (in_array($view, $views, true) && $view !== 'overview') {
+        $socialPanels = array(
+            'timeline' => 'Fediverse%2Ftimeline.php',
+            'followers' => 'Fediverse%2Ffollowers.php',
+            'following' => 'Fediverse%2Ffollowing.php'
+        );
+        if (isset($socialPanels[$view])) {
+            $query = 'extending.php?panel=' . $socialPanels[$view];
+        } else {
+            $query = 'extending.php?panel=Fediverse%2Fmanage.php';
+        }
+        if (!isset($socialPanels[$view]) && in_array($view, $views, true) && $view !== 'overview') {
             $query .= '&view=' . rawurlencode($view);
         }
         $this->response->redirect(Typecho_Common::url($query, Typecho_Widget::widget('Widget_Options')->adminUrl));

@@ -74,9 +74,9 @@ assertSameValue(
 
 $reflection = new ReflectionClass(Fediverse_ActivityPub::class);
 assertSameValue(
-    'approved',
+    'waiting',
     $reflection->getConstant('REMOTE_COMMENT_STATUS'),
-    'Remote replies should be approved immediately'
+    'Remote replies should wait for moderation'
 );
 
 fwrite(STDOUT, "reply-author-name: ok\n");

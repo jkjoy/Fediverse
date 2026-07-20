@@ -19,7 +19,14 @@ require_once __DIR__ . '/AdminAction.php';
 class Fediverse_Plugin implements Typecho_Plugin_Interface
 {
     private const PANEL = 'Fediverse/manage.php';
+    private const ADMIN_MENU = '联邦宇宙';
     private const ADMIN_ACTION = 'fediverse-admin';
+
+    private const SOCIAL_PANELS = array(
+        'Fediverse/timeline.php' => array('时间轴', '浏览已关注账号的最新内容'),
+        'Fediverse/followers.php' => array('关注者', '管理本站作者的远端关注者'),
+        'Fediverse/following.php' => array('正在关注', '管理本站作者正在关注的账号')
+    );
 
     private const ROUTES = array(
         'fediverse_webfinger' => array('/.well-known/webfinger', 'webfinger'),
@@ -54,14 +61,7 @@ class Fediverse_Plugin implements Typecho_Plugin_Interface
         foreach (self::ROUTES as $name => $route) {
             Fediverse_Core::helperCall('addRoute', $name, $route[0], 'Fediverse_Action', $route[1], 'index');
         }
-        Fediverse_Core::helperCall(
-            'addPanel',
-            3,
-            self::PANEL,
-            _t('联邦宇宙'),
-            _t('联邦账号与投递管理'),
-            'administrator'
-        );
+        self::ensureAdminPanels();
         Fediverse_Core::helperCall('addAction', self::ADMIN_ACTION, 'Fediverse_AdminAction');
 
         Typecho_Plugin::factory('Widget_Contents_Post_Edit')->finishPublish = array(__CLASS__, 'publishPost');
@@ -77,6 +77,13 @@ class Fediverse_Plugin implements Typecho_Plugin_Interface
             Fediverse_Core::helperCall('removeRoute', $name);
         }
         Fediverse_Core::helperCall('removePanel', 3, self::PANEL);
+        $menuIndex = self::adminMenuIndex();
+        if ($menuIndex !== null) {
+            foreach (array_keys(self::SOCIAL_PANELS) as $panel) {
+                Fediverse_Core::helperCall('removePanel', $menuIndex, $panel);
+            }
+            Fediverse_Core::helperCall('removeMenu', self::ADMIN_MENU);
+        }
         Fediverse_Core::helperCall('removeAction', self::ADMIN_ACTION);
 
         return _t('Fediverse 已停用，联邦数据表和作者密钥已保留。');
@@ -85,6 +92,7 @@ class Fediverse_Plugin implements Typecho_Plugin_Interface
     public static function upgrade()
     {
         Fediverse_Database::install();
+        self::ensureAdminPanels();
         $routingTable = Fediverse_Core::options()->routingTable;
         $upgrades = array(
             'fediverse_following' => 'fediverse_followers',
@@ -96,6 +104,43 @@ class Fediverse_Plugin implements Typecho_Plugin_Interface
                 Fediverse_Core::helperCall('addRoute', $name, $route[0], 'Fediverse_Action', $route[1], $after);
             }
         }
+    }
+
+    private static function ensureAdminPanels()
+    {
+        self::ensurePanel(3, self::PANEL, '联邦管理', '联邦账号、投递队列与入站活动');
+        $menuIndex = self::adminMenuIndex();
+        if ($menuIndex === null) {
+            $menuIndex = (int)Fediverse_Core::helperCall('addMenu', self::ADMIN_MENU);
+        }
+        foreach (self::SOCIAL_PANELS as $panel => $labels) {
+            self::ensurePanel($menuIndex, $panel, $labels[0], $labels[1]);
+        }
+    }
+
+    private static function ensurePanel($index, $panel, $title, $subtitle)
+    {
+        $table = (array)Fediverse_Core::options()->panelTable;
+        $url = 'extending.php?panel=' . urlencode(trim((string)$panel, '/'));
+        foreach ((array)($table['child'][(int)$index] ?? array()) as $item) {
+            if (($item[2] ?? '') !== $url) {
+                continue;
+            }
+            if (($item[0] ?? '') !== $title || ($item[1] ?? '') !== $subtitle) {
+                Fediverse_Core::helperCall('removePanel', (int)$index, $panel);
+                break;
+            }
+            return;
+        }
+        Fediverse_Core::helperCall('addPanel', (int)$index, $panel, _t($title), _t($subtitle), 'administrator');
+    }
+
+    private static function adminMenuIndex()
+    {
+        $table = (array)Fediverse_Core::options()->panelTable;
+        $parents = (array)($table['parent'] ?? array());
+        $key = array_search(self::ADMIN_MENU, $parents, true);
+        return $key === false ? null : (int)$key + 10;
     }
 
     public static function config(Typecho_Widget_Helper_Form $form)
@@ -128,11 +173,29 @@ class Fediverse_Plugin implements Typecho_Plugin_Interface
 
         $comments = new Typecho_Widget_Helper_Form_Element_Radio(
             'acceptReplies',
-            array('1' => _t('接收并直接显示'), '0' => _t('不接收')),
+            array('1' => _t('接收并等待审核'), '0' => _t('不接收')),
             '1',
             _t('远端回复')
         );
         $form->addInput($comments);
+
+        $limits = array(
+            array('inboundActorRateLimit', '30', _t('单 Actor 每 5 分钟活动上限')),
+            array('inboundDomainRateLimit', '100', _t('单来源域每 5 分钟活动上限')),
+            array('inboundActorStorageLimit', '2000', _t('单 Actor 入站活动存储上限')),
+            array('inboundDomainStorageLimit', '10000', _t('单来源域入站活动存储上限'))
+        );
+        foreach ($limits as $limit) {
+            $input = new Typecho_Widget_Helper_Form_Element_Text(
+                $limit[0],
+                null,
+                $limit[1],
+                $limit[2],
+                _t('填写 0 可停用此项限制；存储计数随过期活动日志一起清理。')
+            );
+            $input->addRule('regexp', _t('必须是大于或等于 0 的整数'), '/^\d+$/');
+            $form->addInput($input);
+        }
 
         $batch = new Typecho_Widget_Helper_Form_Element_Text(
             'queueBatch',

@@ -57,11 +57,20 @@ $stats = array(
 );
 
 $views = array('overview', 'queue', 'followers', 'following', 'timeline', 'activities');
-$view = (string)$request->get('view', 'overview');
+$view = isset($fediverseView) ? (string)$fediverseView : (string)$request->get('view', 'overview');
 if (!in_array($view, $views, true)) {
     $view = 'overview';
 }
+$isSocialView = in_array($view, array('followers', 'following', 'timeline'), true);
 $panelUrl = static function ($target = 'overview') use ($options) {
+    $socialPanels = array(
+        'timeline' => 'Fediverse%2Ftimeline.php',
+        'followers' => 'Fediverse%2Ffollowers.php',
+        'following' => 'Fediverse%2Ffollowing.php'
+    );
+    if (isset($socialPanels[$target])) {
+        return Typecho_Common::url('extending.php?panel=' . $socialPanels[$target], $options->adminUrl);
+    }
     $query = 'extending.php?panel=Fediverse%2Fmanage.php';
     if ($target !== 'overview') {
         $query .= '&view=' . rawurlencode($target);
@@ -188,6 +197,7 @@ html{-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
                     <div class="fed-stat"><strong><?php echo $stats['inbound']; ?></strong><span><?php _e('入站活动'); ?></span></div>
                 </div>
 
+                <?php if (!$isSocialView): ?>
                 <div class="fed-actions">
                     <a class="btn btn-s primary fed-action" data-busy="<?php _e('正在处理…'); ?>" href="<?php echo $e($actionUrl('do=run-queue', 'queue')); ?>"><?php _e('立即处理队列'); ?></a>
                     <a class="btn btn-s fed-action" data-busy="<?php _e('正在生成…'); ?>" href="<?php echo $e($actionUrl('do=provision-actors', 'overview')); ?>"><?php _e('生成作者身份'); ?></a>
@@ -201,11 +211,9 @@ html{-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
                 <ul class="typecho-option-tabs fed-tabs">
                     <li<?php if ($view === 'overview'): ?> class="current"<?php endif; ?>><a href="<?php echo $e($panelUrl('overview')); ?>"><?php _e('作者账号'); ?></a></li>
                     <li<?php if ($view === 'queue'): ?> class="current"<?php endif; ?>><a href="<?php echo $e($panelUrl('queue')); ?>"><?php _e('投递队列'); ?></a></li>
-                    <li<?php if ($view === 'followers'): ?> class="current"<?php endif; ?>><a href="<?php echo $e($panelUrl('followers')); ?>"><?php _e('关注者'); ?></a></li>
-                    <li<?php if ($view === 'following'): ?> class="current"<?php endif; ?>><a href="<?php echo $e($panelUrl('following')); ?>"><?php _e('正在关注'); ?></a></li>
-                    <li<?php if ($view === 'timeline'): ?> class="current"<?php endif; ?>><a href="<?php echo $e($panelUrl('timeline')); ?>"><?php _e('时间轴'); ?></a></li>
                     <li<?php if ($view === 'activities'): ?> class="current"<?php endif; ?>><a href="<?php echo $e($panelUrl('activities')); ?>"><?php _e('入站活动'); ?></a></li>
                 </ul>
+                <?php endif; ?>
 
                 <?php if ($view === 'overview'): ?>
                     <?php
