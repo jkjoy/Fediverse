@@ -16,7 +16,7 @@ class Fediverse_Http
         for ($redirects = 0; ; $redirects++) {
             $response = self::request('GET', $currentUrl, array(
                 'Accept: ' . $accept,
-                'User-Agent: Typecho-Fediverse/0.6.0'
+                'User-Agent: Typecho-Fediverse/0.6.1'
             ));
             if (in_array($response['status'], array(301, 302, 303, 307, 308), true)) {
                 if ($redirects >= self::MAX_REDIRECTS) {
@@ -42,40 +42,51 @@ class Fediverse_Http
     public static function signedPost($url, $activity, $actor)
     {
         $body = Fediverse_Core::json($activity);
-        $parts = parse_url($url);
-        $path = ($parts['path'] ?? '/') . (isset($parts['query']) ? '?' . $parts['query'] : '');
-        $host = $parts['host'] ?? '';
-        if (isset($parts['port'])) {
-            $host .= ':' . (int)$parts['port'];
-        }
-        $date = gmdate('D, d M Y H:i:s') . ' GMT';
-        $digest = 'SHA-256=' . base64_encode(hash('sha256', $body, true));
-        $signed = '(request-target): post ' . $path . "\n"
-            . 'host: ' . $host . "\n"
-            . 'date: ' . $date . "\n"
-            . 'digest: ' . $digest;
-        $signature = '';
-        if (!openssl_sign($signed, $signature, $actor['private_key'], OPENSSL_ALGO_SHA256)) {
-            throw new RuntimeException('Unable to sign delivery');
-        }
         $keyId = Fediverse_Core::actorUrl($actor['username']) . '#main-key';
-        $signatureHeader = 'keyId="' . addcslashes($keyId, '"\\')
-            . '",algorithm="rsa-sha256",headers="(request-target) host date digest",signature="'
-            . base64_encode($signature) . '"';
+        $currentUrl = (string)$url;
+        for ($redirects = 0; ; $redirects++) {
+            self::assertSafeUrl($currentUrl);
+            $parts = parse_url($currentUrl);
+            $path = ($parts['path'] ?? '/') . (isset($parts['query']) ? '?' . $parts['query'] : '');
+            $host = $parts['host'] ?? '';
+            if (isset($parts['port'])) {
+                $host .= ':' . (int)$parts['port'];
+            }
+            $date = gmdate('D, d M Y H:i:s') . ' GMT';
+            $digest = 'SHA-256=' . base64_encode(hash('sha256', $body, true));
+            $signed = '(request-target): post ' . $path . "\n"
+                . 'host: ' . $host . "\n"
+                . 'date: ' . $date . "\n"
+                . 'digest: ' . $digest;
+            $signature = '';
+            if (!openssl_sign($signed, $signature, $actor['private_key'], OPENSSL_ALGO_SHA256)) {
+                throw new RuntimeException('Unable to sign delivery');
+            }
+            $signatureHeader = 'keyId="' . addcslashes($keyId, '"\\')
+                . '",algorithm="rsa-sha256",headers="(request-target) host date digest",signature="'
+                . base64_encode($signature) . '"';
 
-        $response = self::request('POST', $url, array(
-            'Accept: application/activity+json',
-            'Content-Type: application/activity+json',
-            'User-Agent: Typecho-Fediverse/0.6.0',
-            'Host: ' . $host,
-            'Date: ' . $date,
-            'Digest: ' . $digest,
-            'Signature: ' . $signatureHeader
-        ), $body);
-        if ($response['status'] < 200 || $response['status'] >= 300) {
-            throw new RuntimeException('Inbox HTTP status ' . $response['status']);
+            $response = self::request('POST', $currentUrl, array(
+                'Accept: application/activity+json',
+                'Content-Type: application/activity+json',
+                'User-Agent: Typecho-Fediverse/0.6.1',
+                'Host: ' . $host,
+                'Date: ' . $date,
+                'Digest: ' . $digest,
+                'Signature: ' . $signatureHeader
+            ), $body);
+            if (in_array($response['status'], array(301, 302, 307, 308), true)) {
+                if ($redirects >= self::MAX_REDIRECTS) {
+                    throw new RuntimeException('Inbox HTTP redirect limit exceeded');
+                }
+                $currentUrl = self::redirectUrl($currentUrl, $response['location']);
+                continue;
+            }
+            if ($response['status'] < 200 || $response['status'] >= 300) {
+                throw new RuntimeException('Inbox HTTP status ' . $response['status']);
+            }
+            return true;
         }
-        return true;
     }
 
     public static function verifyIncoming($request, $rawBody, $expectedActor = null)
@@ -120,12 +131,11 @@ class Fediverse_Http
             }
         }
 
-        $document = self::getJson($params['keyId']);
-        $publicKey = self::extractPublicKey($document, $params['keyId']);
-        $owner = $publicKey['owner'] ?? ($document['id'] ?? '');
-        if ($expectedActor !== null && $owner !== '' && rtrim((string)$owner, '/') !== rtrim((string)$expectedActor, '/')) {
-            throw new RuntimeException('Signature key owner does not match activity actor');
+        if ($expectedActor === null) {
+            throw new RuntimeException('Activity actor is required for signature verification');
         }
+        $document = self::getJson($expectedActor);
+        $publicKey = self::extractPublicKey($document, $params['keyId'], $expectedActor);
         $decoded = base64_decode($params['signature'], true);
         if ($decoded === false || openssl_verify(implode("\n", $lines), $decoded, $publicKey['publicKeyPem'], OPENSSL_ALGO_SHA256) !== 1) {
             throw new RuntimeException('HTTP signature verification failed');
@@ -133,8 +143,11 @@ class Fediverse_Http
         return true;
     }
 
-    private static function extractPublicKey($document, $keyId)
+    private static function extractPublicKey($document, $keyId, $expectedActor)
     {
+        if (rtrim((string)($document['id'] ?? ''), '/') !== rtrim((string)$expectedActor, '/')) {
+            throw new RuntimeException('Actor document ID does not match activity actor');
+        }
         $key = $document['publicKey'] ?? null;
         if (is_array($key) && isset($key[0])) {
             foreach ($key as $candidate) {
@@ -144,8 +157,11 @@ class Fediverse_Http
                 }
             }
         }
-        if (!is_array($key) || empty($key['publicKeyPem'])) {
+        if (!is_array($key) || ($key['id'] ?? '') !== $keyId || empty($key['publicKeyPem'])) {
             throw new RuntimeException('Remote public key was not found');
+        }
+        if (rtrim((string)($key['owner'] ?? ''), '/') !== rtrim((string)$expectedActor, '/')) {
+            throw new RuntimeException('Signature key owner does not match activity actor');
         }
         return $key;
     }

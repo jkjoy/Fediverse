@@ -13,7 +13,7 @@ require_once __DIR__ . '/AdminAction.php';
  *
  * @package Fediverse
  * @author Typecho Community
- * @version 0.6.0
+ * @version 0.6.1
  * @link https://www.w3.org/TR/activitypub/
  */
 class Fediverse_Plugin implements Typecho_Plugin_Interface
@@ -66,7 +66,7 @@ class Fediverse_Plugin implements Typecho_Plugin_Interface
 
         Typecho_Plugin::factory('Widget_Contents_Post_Edit')->finishPublish = array(__CLASS__, 'publishPost');
         Typecho_Plugin::factory('Widget_Contents_Post_Edit')->finishMark = array(__CLASS__, 'markPost');
-        Typecho_Plugin::factory('Widget_Contents_Post_Edit')->delete = array(__CLASS__, 'deletePost');
+        Typecho_Plugin::factory('Widget_Contents_Post_Edit')->finishDelete = array(__CLASS__, 'deletePost');
 
         return _t('Fediverse 已启用。请保存插件设置，并为服务器配置队列 Cron。');
     }

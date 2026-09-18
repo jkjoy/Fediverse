@@ -83,6 +83,11 @@ class Fediverse_Database
             . '`to_actor` text NOT NULL, `published` int unsigned NOT NULL, `deleted` tinyint unsigned NOT NULL DEFAULT 0, '
             . 'PRIMARY KEY (`token`)'
             . ') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4');
+        $db->query('CREATE TABLE IF NOT EXISTS `' . $p . 'fediverse_reply_objects` ('
+            . '`object_hash` char(64) NOT NULL, `actor` text NOT NULL, `object_id` text NOT NULL, '
+            . '`comment_id` int unsigned NOT NULL, `created` int unsigned NOT NULL, '
+            . 'PRIMARY KEY (`object_hash`)'
+            . ') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4');
     }
 
     private static function installPgsql($db, $p)
@@ -133,6 +138,9 @@ class Fediverse_Database
         $db->query('CREATE TABLE IF NOT EXISTS ' . $q('replies') . ' ('
             . '"token" char(32) PRIMARY KEY, "uid" integer NOT NULL, "in_reply_to" text NOT NULL, "content" text NOT NULL, '
             . '"to_actor" text NOT NULL, "published" integer NOT NULL, "deleted" integer NOT NULL DEFAULT 0)');
+        $db->query('CREATE TABLE IF NOT EXISTS ' . $q('reply_objects') . ' ('
+            . '"object_hash" char(64) PRIMARY KEY, "actor" text NOT NULL, "object_id" text NOT NULL, '
+            . '"comment_id" integer NOT NULL, "created" integer NOT NULL)');
     }
 
     private static function installSqlite($db, $p)
@@ -183,5 +191,8 @@ class Fediverse_Database
         $db->query('CREATE TABLE IF NOT EXISTS ' . $q('replies') . ' ('
             . '`token` char(32) PRIMARY KEY, `uid` INTEGER NOT NULL, `in_reply_to` text NOT NULL, `content` text NOT NULL, '
             . '`to_actor` text NOT NULL, `published` INTEGER NOT NULL, `deleted` INTEGER NOT NULL DEFAULT 0)');
+        $db->query('CREATE TABLE IF NOT EXISTS ' . $q('reply_objects') . ' ('
+            . '`object_hash` char(64) PRIMARY KEY, `actor` text NOT NULL, `object_id` text NOT NULL, '
+            . '`comment_id` INTEGER NOT NULL, `created` INTEGER NOT NULL)');
     }
 }

@@ -33,7 +33,7 @@ class Fediverse_Action extends Typecho_Widget
         if (!$user || !Fediverse_Core::isEnabled()) {
             $this->error(404, 'Actor not found');
         }
-        $this->respond(Fediverse_ActivityPub::outbox($user), 'application/activity+json');
+        $this->respond(Fediverse_ActivityPub::outbox($user, (int)$this->request->get('page', 0)), 'application/activity+json');
     }
 
     public function followers()

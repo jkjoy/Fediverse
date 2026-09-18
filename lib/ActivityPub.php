@@ -194,17 +194,20 @@ class Fediverse_ActivityPub
         );
     }
 
-    public static function outbox($user)
+    public static function outbox($user, $page = 0)
     {
         $db = Typecho_Db::get();
         $actor = Fediverse_Core::ensureActor($user);
         $actorUrl = Fediverse_Core::actorUrl($actor['username']);
+        $outboxUrl = $actorUrl . '/outbox';
+        $page = max(0, min(100000, (int)$page));
         $countRow = $db->fetchRow($db->select(array('COUNT(cid)' => 'num'))->from('table.contents')
             ->where('authorId = ?', (int)$user['uid'])->where('type = ?', 'post')->where('status = ?', 'publish')
             ->where("password IS NULL OR password = ''"));
         $rows = $db->fetchAll($db->select('cid')->from('table.contents')
             ->where('authorId = ?', (int)$user['uid'])->where('type = ?', 'post')->where('status = ?', 'publish')
-            ->where("password IS NULL OR password = ''")->order('created', Typecho_Db::SORT_DESC)->limit(20));
+            ->where("password IS NULL OR password = ''")->order('created', Typecho_Db::SORT_DESC)
+            ->order('cid', Typecho_Db::SORT_DESC)->page(max(1, $page), 20));
         $items = array();
         foreach ($rows as $row) {
             $note = self::noteForPost((int)$row['cid']);
@@ -220,13 +223,28 @@ class Fediverse_ActivityPub
                 );
             }
         }
-        return array(
+        $collection = array(
             '@context' => self::CONTEXT,
-            'id' => $actorUrl . '/outbox',
+            'id' => $outboxUrl,
             'type' => 'OrderedCollection',
             'totalItems' => (int)($countRow['num'] ?? 0),
+            'first' => $outboxUrl . '?page=1',
             'orderedItems' => $items
         );
+        if ($page === 0) {
+            return $collection;
+        }
+        $collection['id'] = $outboxUrl . '?page=' . $page;
+        $collection['type'] = 'OrderedCollectionPage';
+        $collection['partOf'] = $outboxUrl;
+        unset($collection['first']);
+        if ($page > 1) {
+            $collection['prev'] = $outboxUrl . '?page=' . ($page - 1);
+        }
+        if ($page * 20 < (int)$countRow['num']) {
+            $collection['next'] = $outboxUrl . '?page=' . ($page + 1);
+        }
+        return $collection;
     }
 
     public static function followers($user)
@@ -364,8 +382,31 @@ class Fediverse_ActivityPub
         $days = max(7, min(3650, $days));
         $db = Typecho_Db::get();
         $before = time() - ($days * 86400);
+        $lastId = 0;
+        do {
+            $legacy = $db->fetchAll($db->select('aid', 'actor', 'object_id', 'status')
+                ->from(Fediverse_Database::table('activities'))
+                ->where('aid > ?', $lastId)->where('created < ?', $before)
+                ->where('type IN ?', array('Create', 'Update'))
+                ->where('(status LIKE ? OR status = ?)', 'comment:%', 'deleted')
+                ->order('aid', Typecho_Db::SORT_ASC)->limit(200));
+            foreach ($legacy as $row) {
+                $lastId = (int)$row['aid'];
+                if ((string)$row['object_id'] === '') {
+                    continue;
+                }
+                $hash = self::replyHash((string)$row['object_id'], (string)$row['actor']);
+                $existing = $db->fetchRow($db->select('object_hash')->from(Fediverse_Database::table('reply_objects'))
+                    ->where('object_hash = ?', $hash)->limit(1));
+                if (!$existing) {
+                    preg_match('/^comment:(\d+)$/', (string)$row['status'], $matches);
+                    self::rememberReply((string)$row['object_id'], (string)$row['actor'], (int)($matches[1] ?? 0));
+                }
+            }
+        } while (count($legacy) === 200);
         $count = (int)$db->query($db->delete(Fediverse_Database::table('activities'))
-            ->where('created < ?', $before));
+            ->where('created < ?', $before)
+            ->where("NOT (type IN ('Like', 'Announce') AND status IN ('accepted', 'undone'))"));
         $db->query($db->delete(Fediverse_Database::table('inbound'))->where('created < ?', $before));
         return $count;
     }
@@ -448,9 +489,9 @@ class Fediverse_ActivityPub
         if ($attributedTo !== '' && rtrim($attributedTo, '/') !== rtrim($actorId, '/')) {
             throw new InvalidArgumentException('Reply attribution does not match activity actor');
         }
-        $existingCommentId = self::commentIdForObject($objectId, $actorId);
-        if ($existingCommentId) {
-            return $existingCommentId;
+        $existingReply = self::replyRecord($objectId, $actorId);
+        if ($existingReply !== null) {
+            return (int)$existingReply['comment_id'];
         }
         $cid = self::cidForObject($replyTo);
         if (!$cid) {
@@ -483,7 +524,9 @@ class Fediverse_ActivityPub
             'parent' => 0
         ), $cid);
         $comments = Typecho_Widget::widget('Widget_Abstract_Comments@fediverse_insert');
-        return (int)$comments->insert($comment);
+        $commentId = (int)$comments->insert($comment);
+        self::rememberReply($objectId, $actorId, $commentId);
+        return $commentId;
     }
 
     private static function updateReply($activity, $user, $actorId, $request)
@@ -579,29 +622,67 @@ class Fediverse_ActivityPub
             return;
         }
         $db = Typecho_Db::get();
-        $row = $db->fetchRow($db->select('status')->from(Fediverse_Database::table('activities'))
-            ->where('object_id = ?', $objectId)->where('actor = ?', $actorId)->limit(1));
-        if ($row && preg_match('/^comment:(\d+)$/', (string)$row['status'], $matches)) {
+        $commentId = self::commentIdForObject($objectId, $actorId);
+        if ($commentId) {
             $comments = Typecho_Widget::widget('Widget_Abstract_Comments@fediverse_delete');
-            $comments->delete($db->sql()->where('coid = ?', (int)$matches[1]));
+            $comments->delete($db->sql()->where('coid = ?', $commentId));
+            self::rememberReply($objectId, $actorId, 0);
             $db->query($db->update(Fediverse_Database::table('activities'))->rows(array('status' => 'deleted'))
                 ->where('object_id = ?', $objectId)->where('actor = ?', $actorId)
                 ->where('status LIKE ?', 'comment:%'));
         }
     }
 
-    private static function commentIdForObject($objectId, $actorId)
+    private static function replyHash($objectId, $actorId)
+    {
+        return hash('sha256', (string)$actorId . "\0" . (string)$objectId);
+    }
+
+    private static function replyRecord($objectId, $actorId)
     {
         if ($objectId === '') {
-            return 0;
+            return null;
         }
         $db = Typecho_Db::get();
-        $row = $db->fetchRow($db->select('status')->from(Fediverse_Database::table('activities'))
+        $record = $db->fetchRow($db->select('comment_id')->from(Fediverse_Database::table('reply_objects'))
+            ->where('object_hash = ?', self::replyHash($objectId, $actorId))->limit(1));
+        if ($record) {
+            return $record;
+        }
+        $legacy = $db->fetchRow($db->select('status')->from(Fediverse_Database::table('activities'))
             ->where('object_id = ?', $objectId)->where('actor = ?', $actorId)
-            ->where('status LIKE ?', 'comment:%')->order('aid', Typecho_Db::SORT_DESC)->limit(1));
-        return $row && preg_match('/^comment:(\d+)$/', (string)$row['status'], $matches)
-            ? (int)$matches[1]
-            : 0;
+            ->where('type IN ?', array('Create', 'Update'))
+            ->where('(status LIKE ? OR status = ?)', 'comment:%', 'deleted')
+            ->order('aid', Typecho_Db::SORT_DESC)->limit(1));
+        if (!$legacy) {
+            return null;
+        }
+        preg_match('/^comment:(\d+)$/', (string)$legacy['status'], $matches);
+        return array('comment_id' => (int)($matches[1] ?? 0));
+    }
+
+    private static function rememberReply($objectId, $actorId, $commentId)
+    {
+        $db = Typecho_Db::get();
+        $table = Fediverse_Database::table('reply_objects');
+        $hash = self::replyHash($objectId, $actorId);
+        $existing = $db->fetchRow($db->select('object_hash')->from($table)
+            ->where('object_hash = ?', $hash)->limit(1));
+        if ($existing) {
+            $db->query($db->update($table)->rows(array('comment_id' => (int)$commentId))
+                ->where('object_hash = ?', $hash));
+        } else {
+            $db->query($db->insert($table)->rows(array(
+                'object_hash' => $hash, 'actor' => $actorId, 'object_id' => $objectId,
+                'comment_id' => (int)$commentId, 'created' => time()
+            )));
+        }
+    }
+
+    private static function commentIdForObject($objectId, $actorId)
+    {
+        $record = self::replyRecord($objectId, $actorId);
+        return $record === null ? 0 : (int)$record['comment_id'];
     }
 
     private static function replyAuthorName($activity, $object, $actorId)
