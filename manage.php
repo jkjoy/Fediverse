@@ -142,6 +142,17 @@ html{-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
 .fed-value code{min-width:0}
 .fed-copy{flex:0 0 auto;min-height:40px;padding:0 9px;border:1px solid #d5d5d2;border-radius:4px;background:#fff;color:#555;cursor:pointer}
 .fed-copy:hover{border-color:#b8b8b4;color:#222}
+.fed-cron-help{margin:4px 0 20px;border-bottom:1px solid #eee}
+.fed-cron-help>summary{display:flex;align-items:center;min-height:44px;color:#467b96;font-weight:600;cursor:pointer;list-style:none}
+.fed-cron-help>summary::-webkit-details-marker{display:none}
+.fed-cron-help>summary::after{content:"";width:7px;height:7px;margin-left:10px;border-right:1.5px solid currentColor;border-bottom:1.5px solid currentColor;transform:rotate(45deg);transition:transform 160ms ease-out}
+.fed-cron-help[open]>summary::after{transform:rotate(225deg)}
+.fed-cron-help__body{padding:2px 0 14px;line-height:1.7}
+.fed-cron-help__body h3{margin:16px 0 5px;font-size:14px}
+.fed-cron-help__body p{margin:5px 0;color:#555}
+.fed-cron-help__body ol{margin:6px 0;padding-left:22px}
+.fed-cron-command{display:flex;align-items:center;gap:8px;max-width:100%;margin:8px 0}
+.fed-cron-command code{display:block;min-width:0;padding:8px 10px;border:1px solid #e5e5e2;background:#fafafa;word-break:break-all}
 .fed-state{display:inline-block;padding:1px 6px;border-radius:4px;background:#edf7ed;color:#286b32;font-size:12px}
 .fed-state.warn{background:#fff6df;color:#8a5a00}
 .fed-state.error{background:#fff0ee;color:#a33226}
@@ -177,7 +188,7 @@ html{-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
 .fed-tabs a{display:inline-flex;align-items:center;min-height:40px;box-sizing:border-box}
 .fed-status,.typecho-list-table{font-variant-numeric:tabular-nums}
 .typecho-table-wrap{overflow-x:auto}
-.fed-actions a:focus-visible,.fed-tabs a:focus-visible,.fed-table-actions a:focus-visible,.fed-copy:focus-visible,.fed-feed-actions a:focus-visible,.fed-reply summary:focus-visible{outline:2px solid #467b96;outline-offset:2px}
+.fed-actions a:focus-visible,.fed-tabs a:focus-visible,.fed-table-actions a:focus-visible,.fed-copy:focus-visible,.fed-feed-actions a:focus-visible,.fed-reply summary:focus-visible,.fed-cron-help>summary:focus-visible{outline:2px solid #467b96;outline-offset:2px}
 .fed-live{position:fixed;right:20px;bottom:20px;z-index:1000;padding:9px 12px;border-radius:4px;background:#262626;color:#fff;box-shadow:0 4px 14px rgba(0,0,0,.18)}
 .fed-live[hidden]{display:none}
 @media(max-width:760px){.fed-status{grid-template-columns:repeat(2,minmax(0,1fr))}.fed-stat{border-bottom:1px solid #e5e5e2}.fed-endpoint{grid-template-columns:1fr;gap:0}.typecho-list-table{min-width:760px}.fed-follow-form{grid-template-columns:1fr;align-items:stretch}.fed-feed-head{flex-direction:column;gap:3px}.fed-feed-time{order:2}}
@@ -218,17 +229,52 @@ html{-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
                 <?php if ($view === 'overview'): ?>
                     <?php
                     $httpsReady = strtolower((string)parse_url((string)$options->siteUrl, PHP_URL_SCHEME)) === 'https';
+                    $domainReady = Fediverse_Core::hasDomain();
                     $cronToken = (string)Fediverse_Core::setting('cronToken', '');
                     ?>
                     <div class="fed-endpoints">
                         <div class="fed-endpoint"><strong><?php _e('HTTPS'); ?></strong><span><span class="fed-state <?php echo $httpsReady ? '' : 'error'; ?>"><?php echo $httpsReady ? _t('正常') : _t('未启用'); ?></span></span></div>
-                        <?php $sharedInbox = Fediverse_Core::url('fediverse/inbox'); ?>
-                        <?php $webfingerUrl = Fediverse_Core::origin() . '/.well-known/webfinger'; ?>
-                        <?php $cronUrl = $cronToken !== '' ? Fediverse_Core::url('fediverse/cron/' . $cronToken) : ''; ?>
-                        <div class="fed-endpoint"><strong><?php _e('共享收件箱'); ?></strong><span class="fed-value"><code><?php echo $e($sharedInbox); ?></code><button class="fed-copy" type="button" data-copy="<?php echo $e($sharedInbox); ?>"><?php _e('复制'); ?></button></span></div>
-                        <div class="fed-endpoint"><strong><?php _e('WebFinger'); ?></strong><span class="fed-value"><code><?php echo $e($webfingerUrl); ?></code><button class="fed-copy" type="button" data-copy="<?php echo $e($webfingerUrl); ?>"><?php _e('复制'); ?></button></span></div>
-                        <div class="fed-endpoint"><strong><?php _e('Cron'); ?></strong><span class="fed-value"><code><?php echo $cronUrl !== '' ? $e($cronUrl) : _t('尚未保存令牌'); ?></code><?php if ($cronUrl !== ''): ?><button class="fed-copy" type="button" data-copy="<?php echo $e($cronUrl); ?>"><?php _e('复制'); ?></button><?php endif; ?></span></div>
+                        <div class="fed-endpoint"><strong><?php _e('联邦域名'); ?></strong><span><span class="fed-state <?php echo $domainReady ? '' : 'error'; ?>"><?php echo $domainReady ? $e(Fediverse_Core::domain()) : _t('未设置，请先打开插件设置'); ?></span></span></div>
+                        <?php $sharedInbox = $domainReady ? Fediverse_Core::url('fediverse/inbox') : ''; ?>
+                        <?php $webfingerUrl = $domainReady ? Fediverse_Core::origin() . '/.well-known/webfinger' : ''; ?>
+                        <?php $cronUrl = $domainReady && $cronToken !== '' ? Fediverse_Core::url('fediverse/cron/' . $cronToken) : ''; ?>
+                        <div class="fed-endpoint"><strong><?php _e('共享收件箱'); ?></strong><span class="fed-value"><code><?php echo $sharedInbox !== '' ? $e($sharedInbox) : _t('配置联邦域名后生成'); ?></code><?php if ($sharedInbox !== ''): ?><button class="fed-copy" type="button" data-copy="<?php echo $e($sharedInbox); ?>"><?php _e('复制'); ?></button><?php endif; ?></span></div>
+                        <div class="fed-endpoint"><strong><?php _e('WebFinger'); ?></strong><span class="fed-value"><code><?php echo $webfingerUrl !== '' ? $e($webfingerUrl) : _t('配置联邦域名后生成'); ?></code><?php if ($webfingerUrl !== ''): ?><button class="fed-copy" type="button" data-copy="<?php echo $e($webfingerUrl); ?>"><?php _e('复制'); ?></button><?php endif; ?></span></div>
+                        <div class="fed-endpoint"><strong><?php _e('Cron'); ?></strong><span class="fed-value"><code><?php echo $cronUrl !== '' ? $e($cronUrl) : (!$domainReady ? _t('请先设置联邦域名') : _t('尚未保存令牌')); ?></code><?php if ($cronUrl !== ''): ?><button class="fed-copy" type="button" data-copy="<?php echo $e($cronUrl); ?>"><?php _e('复制'); ?></button><?php endif; ?></span></div>
                     </div>
+
+                    <details class="fed-cron-help">
+                        <summary><?php _e('如何设置定时任务'); ?></summary>
+                        <div class="fed-cron-help__body">
+                            <?php if ($cronUrl === ''): ?>
+                                <p><?php echo !$domainReady ? _t('请先打开插件设置并保存联邦域名，然后返回此页查看完整任务地址和命令。') : _t('请先打开插件设置并保存 Cron 令牌，然后返回此页查看完整任务地址和命令。'); ?></p>
+                            <?php else: ?>
+                                <?php $cronCommand = 'curl -fsS --max-time 50 "' . str_replace(array('\\', '"', '$', '`'), array('\\\\', '\\"', '\\$', '\\`'), $cronUrl) . '" >/dev/null 2>&1'; ?>
+                                <p><?php _e('建议每分钟访问一次 Cron 地址。任务会发送投递队列、安排失败重试并清理过期数据。'); ?></p>
+
+                                <h3><?php _e('宝塔面板'); ?></h3>
+                                <ol>
+                                    <li><?php _e('进入“计划任务”，任务类型选择“Shell 脚本”。'); ?></li>
+                                    <li><?php _e('执行周期选择“N 分钟”，分钟填写 1。'); ?></li>
+                                    <li><?php _e('粘贴下方命令，保存后手动执行一次。'); ?></li>
+                                </ol>
+                                <div class="fed-cron-command"><code><?php echo $e($cronCommand); ?></code><button class="fed-copy" type="button" data-copy="<?php echo $e($cronCommand); ?>"><?php _e('复制命令'); ?></button></div>
+
+                                <h3><?php _e('支持 URL 定时访问的主机面板'); ?></h3>
+                                <p><?php _e('任务类型选择“访问 URL”或“HTTP 请求”，周期设为每 1 分钟，请求方法使用 GET，并填写下方地址。'); ?></p>
+                                <div class="fed-cron-command"><code><?php echo $e($cronUrl); ?></code><button class="fed-copy" type="button" data-copy="<?php echo $e($cronUrl); ?>"><?php _e('复制地址'); ?></button></div>
+
+                                <h3><?php _e('Linux Crontab'); ?></h3>
+                                <?php $cronLine = '* * * * * ' . $cronCommand; ?>
+                                <p><?php _e('运行 crontab -e，将下方整行加入任务列表。'); ?></p>
+                                <div class="fed-cron-command"><code><?php echo $e($cronLine); ?></code><button class="fed-copy" type="button" data-copy="<?php echo $e($cronLine); ?>"><?php _e('复制配置'); ?></button></div>
+
+                                <h3><?php _e('验证'); ?></h3>
+                                <p><?php _e('手动访问 Cron 地址后应返回 JSON，其中 processed 是本次处理数，sent 是成功数，failed 是失败数。再到“投递队列”检查失败任务和错误信息。'); ?></p>
+                                <p class="fed-muted"><?php _e('Cron 地址包含私密令牌，请勿公开、截图分享或提交到公开仓库。若令牌泄露，请在插件设置中更换并同步更新定时任务。'); ?></p>
+                            <?php endif; ?>
+                        </div>
+                    </details>
 
                     <div class="typecho-table-wrap">
                         <table class="typecho-list-table">
@@ -240,16 +286,16 @@ html{-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
                                 $uid = (int)$localUser['uid'];
                                 $actor = $actorMap[$uid] ?? null;
                                 $username = $actor ? $actor['username'] : Fediverse_Core::usernameForUser($localUser);
-                                $enabled = Fediverse_Core::userEnabled($uid);
-                                $actorUrl = Fediverse_Core::actorUrl($username);
+                                $enabled = $domainReady && Fediverse_Core::userEnabled($uid);
+                                $actorUrl = $domainReady ? Fediverse_Core::actorUrl($username) : '';
                                 ?>
                                 <tr>
                                     <td><strong><?php echo $e($localUser['screenName'] ?: $localUser['name']); ?></strong><br><span class="fed-muted">UID <?php echo $uid; ?></span></td>
-                                    <?php $handle = '@' . $username . '@' . Fediverse_Core::domain(); ?>
-                                    <td class="fed-break"><span class="fed-value"><code><?php echo $e($handle); ?></code><button class="fed-copy" type="button" data-copy="<?php echo $e($handle); ?>"><?php _e('复制'); ?></button></span></td>
-                                    <td><span class="fed-state <?php echo !$enabled ? 'error' : ($actor ? '' : 'warn'); ?>"><?php echo !$enabled ? _t('作者已停用') : ($actor ? _t('可发现') : _t('待生成')); ?></span></td>
+                                    <?php $handle = $domainReady ? '@' . $username . '@' . Fediverse_Core::domain() : ''; ?>
+                                    <td class="fed-break"><span class="fed-value"><code><?php echo $handle !== '' ? $e($handle) : _t('配置联邦域名后生成'); ?></code><?php if ($handle !== ''): ?><button class="fed-copy" type="button" data-copy="<?php echo $e($handle); ?>"><?php _e('复制'); ?></button><?php endif; ?></span></td>
+                                    <td><span class="fed-state <?php echo !$enabled ? 'error' : ($actor ? '' : 'warn'); ?>"><?php echo !$domainReady ? _t('等待设置域名') : (!$enabled ? _t('作者已停用') : ($actor ? _t('可发现') : _t('待生成'))); ?></span></td>
                                     <td><?php echo $actor ? $e($formatTime($actor['created'])) : '-'; ?></td>
-                                    <td><?php if ($actor): ?><a href="<?php echo $e($actorUrl); ?>" target="_blank" rel="noopener noreferrer"><?php _e('查看'); ?></a><?php else: ?>-<?php endif; ?></td>
+                                    <td><?php if ($actor && $actorUrl !== ''): ?><a href="<?php echo $e($actorUrl); ?>" target="_blank" rel="noopener noreferrer"><?php _e('查看'); ?></a><?php else: ?>-<?php endif; ?></td>
                                 </tr>
                             <?php endforeach; ?>
                             <?php if (!$users): ?><tr><td colspan="5"><?php _e('没有作者账号'); ?></td></tr><?php endif; ?>

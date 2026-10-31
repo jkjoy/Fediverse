@@ -76,6 +76,9 @@ class Fediverse_Queue
 
     public static function enqueueActorUpdate($uid)
     {
+        if (!Fediverse_Core::isEnabled()) {
+            return 0;
+        }
         $uid = (int)$uid;
         $user = Fediverse_Core::userById($uid);
         if (!$user || !Fediverse_Core::userEnabled($uid)) {
@@ -135,6 +138,9 @@ class Fediverse_Queue
 
     public static function run($limit = null)
     {
+        if (!Fediverse_Core::isEnabled()) {
+            throw new RuntimeException('请先启用插件并设置有效的联邦域名');
+        }
         $limit = $limit === null ? (int)Fediverse_Core::setting('queueBatch', 20) : (int)$limit;
         $limit = max(1, min(100, $limit));
         $db = Typecho_Db::get();

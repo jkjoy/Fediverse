@@ -13,7 +13,7 @@ require_once __DIR__ . '/AdminAction.php';
  *
  * @package Fediverse
  * @author Typecho Community
- * @version 0.6.1
+ * @version 0.6.2
  * @link https://www.w3.org/TR/activitypub/
  */
 class Fediverse_Plugin implements Typecho_Plugin_Interface
@@ -68,7 +68,7 @@ class Fediverse_Plugin implements Typecho_Plugin_Interface
         Typecho_Plugin::factory('Widget_Contents_Post_Edit')->finishMark = array(__CLASS__, 'markPost');
         Typecho_Plugin::factory('Widget_Contents_Post_Edit')->finishDelete = array(__CLASS__, 'deletePost');
 
-        return _t('Fediverse 已启用。请保存插件设置，并为服务器配置队列 Cron。');
+        return _t('Fediverse 已启用。首次使用必须在插件设置中填写并保存联邦域名，然后配置队列 Cron。');
     }
 
     public static function deactivate()
@@ -158,7 +158,14 @@ class Fediverse_Plugin implements Typecho_Plugin_Interface
             null,
             '',
             _t('联邦域名'),
-            _t('通常留空，自动使用博客域名。只填写域名，不要包含协议或路径。')
+            _t('首次启用后必须填写。它会成为联邦账号的永久身份域名，只填写域名，不要包含协议、端口或路径；保存后不建议修改。')
+        );
+        $domain->addRule('required', _t('必须填写联邦域名'));
+        $domain->addRule(
+            'regexp',
+            _t('联邦域名格式不正确'),
+            '/^(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+'
+                . '[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$/'
         );
         $domain->addRule('xssCheck', _t('域名格式不正确'));
         $form->addInput($domain);
@@ -221,7 +228,7 @@ class Fediverse_Plugin implements Typecho_Plugin_Interface
             null,
             bin2hex(random_bytes(12)),
             _t('Cron 令牌'),
-            _t('Cron 请求地址中的私密令牌，建议保存自动生成值。')
+            _t('Cron 请求地址中的私密令牌。保存后可在“管理 → 联邦管理 → 作者账号”查看定时任务设置说明。')
         );
         $token->addRule('alphaNumeric', _t('令牌只能包含字母和数字'));
         $form->addInput($token);

@@ -70,6 +70,9 @@ class Fediverse_Client
 
     public static function follow($uid, $identifier)
     {
+        if (!Fediverse_Core::isEnabled()) {
+            throw new RuntimeException('请先启用插件并设置有效的联邦域名');
+        }
         Fediverse_Database::install();
         $uid = (int)$uid;
         $user = Fediverse_Core::userById($uid);

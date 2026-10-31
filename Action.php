@@ -10,6 +10,9 @@ class Fediverse_Action extends Typecho_Widget
 {
     public function webfinger()
     {
+        if (!Fediverse_Core::isEnabled()) {
+            $this->error(404, 'WebFinger is disabled');
+        }
         try {
             $data = Fediverse_ActivityPub::webfinger($this->request->get('resource', ''));
             $this->respond($data, 'application/jrd+json');
@@ -123,6 +126,9 @@ class Fediverse_Action extends Typecho_Widget
         $provided = (string)$this->request->get('token', '');
         if ($configured === '' || !hash_equals($configured, $provided)) {
             $this->error(404, 'Not found');
+        }
+        if (!Fediverse_Core::isEnabled()) {
+            $this->error(409, 'Configure the federation domain before running the queue');
         }
         $result = Fediverse_Queue::run();
         $result['prunedActivities'] = Fediverse_ActivityPub::pruneLogs();

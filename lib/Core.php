@@ -40,7 +40,17 @@ class Fediverse_Core
 
     public static function isEnabled()
     {
-        return (string)self::setting('enabled', '1') === '1';
+        return (string)self::setting('enabled', '1') === '1' && self::hasDomain();
+    }
+
+    public static function hasDomain()
+    {
+        $domain = strtolower(trim((string)self::setting('domain', '')));
+        return $domain !== '' && preg_match(
+            '/^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+'
+                . '[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/',
+            $domain
+        ) === 1;
     }
 
     public static function options()
@@ -67,8 +77,8 @@ class Fediverse_Core
     public static function domain()
     {
         $domain = strtolower(trim((string)self::setting('domain', '')));
-        if ($domain !== '') {
-            return preg_replace('/[^a-z0-9.:-]/i', '', $domain);
+        if (self::hasDomain()) {
+            return $domain;
         }
         return strtolower((string)parse_url((string)self::options()->siteUrl, PHP_URL_HOST));
     }
