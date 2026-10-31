@@ -10,3 +10,5 @@ require_once __DIR__ . '/lib/Http.php';
 require_once __DIR__ . '/lib/Client.php';
 require_once __DIR__ . '/lib/ActivityPub.php';
 require_once __DIR__ . '/lib/Queue.php';
+require_once __DIR__ . '/lib/Notifications.php';
+require_once __DIR__ . '/lib/Comments.php';

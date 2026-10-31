@@ -126,7 +126,7 @@ class Fediverse_Queue
     {
         $db = Typecho_Db::get();
         $now = time();
-        $db->query($db->insert(Fediverse_Database::table('queue'))->rows(array(
+        $qid = (int)$db->query($db->insert(Fediverse_Database::table('queue'))->rows(array(
             'uid' => (int)$uid,
             'inbox' => (string)$inbox,
             'activity' => Fediverse_Core::json($activity),
@@ -136,7 +136,11 @@ class Fediverse_Queue
             'created' => $now,
             'updated' => $now
         )));
+        if ($qid <= 0) {
+            throw new RuntimeException('Unable to persist delivery queue item');
+        }
         self::scheduleAutoDispatch();
+        return $qid;
     }
 
     public static function scheduleAutoDispatch()
@@ -179,47 +183,74 @@ class Fediverse_Queue
         $limit = max(1, min(100, $limit));
         $db = Typecho_Db::get();
         $table = Fediverse_Database::table('queue');
-        $rows = $db->fetchAll($db->select()->from($table)
-            ->where('available <= ?', time())->where('attempts < ?', 8)
-            ->order('qid', Typecho_Db::SORT_ASC)->limit($limit));
         $result = array('processed' => 0, 'sent' => 0, 'failed' => 0);
-        foreach ($rows as $row) {
-            $claimed = $db->query($db->update($table)->rows(array(
-                'available' => time() + 300,
-                'updated' => time()
-            ))->where('qid = ?', (int)$row['qid'])->where('available <= ?', time()));
-            if (!$claimed) {
-                continue;
+        $cursor = 0;
+        $madeProgress = false;
+        while ($result['processed'] < $limit) {
+            $rows = $db->fetchAll($db->select('delivery.*')->from($table . ' delivery')
+                ->join($table . ' predecessor',
+                    'predecessor.uid = delivery.uid AND predecessor.inbox = delivery.inbox'
+                    . ' AND predecessor.qid < delivery.qid AND predecessor.attempts < 8', Typecho_Db::LEFT_JOIN)
+                ->where('predecessor.qid IS NULL')->where('delivery.qid > ?', $cursor)
+                ->where('delivery.available <= ?', time())->where('delivery.attempts < ?', 8)
+                ->order('delivery.qid', Typecho_Db::SORT_ASC)->limit($limit - $result['processed']));
+            if (!$rows) {
+                if ($madeProgress) {
+                    // Deliveries can unblock lower qids that were absent from this scan.
+                    $cursor = 0;
+                    $madeProgress = false;
+                    continue;
+                }
+                break;
             }
-            $result['processed']++;
-            try {
-                $actor = Fediverse_Core::actorByUid((int)$row['uid']);
-                $activity = json_decode((string)$row['activity'], true, 32);
-                if (!$actor || !is_array($activity)) {
-                    throw new RuntimeException('Queue actor or activity is unavailable');
+            foreach ($rows as $row) {
+                $cursor = (int)$row['qid'];
+                $earlier = $db->fetchRow($db->select('qid')->from($table)
+                    ->where('uid = ?', (int)$row['uid'])->where('inbox = ?', (string)$row['inbox'])
+                    ->where('qid < ?', (int)$row['qid'])->where('attempts < ?', 8)
+                    ->order('qid', Typecho_Db::SORT_ASC)->limit(1));
+                if ($earlier) {
+                    continue;
                 }
-                Fediverse_Http::signedPost((string)$row['inbox'], $activity, $actor);
-                $db->query($db->delete($table)->where('qid = ?', (int)$row['qid']));
-                $result['sent']++;
-            } catch (Throwable $e) {
-                $attempts = (int)$row['attempts'] + 1;
-                if ($attempts >= 8) {
-                    $db->query($db->update($table)->rows(array(
-                        'attempts' => 8,
-                        'available' => 2147483647,
-                        'last_error' => Typecho_Common::subStr($e->getMessage(), 0, 500, ''),
-                        'updated' => time()
-                    ))->where('qid = ?', (int)$row['qid']));
-                } else {
-                    $delay = min(21600, 60 * (2 ** ($attempts - 1)));
-                    $db->query($db->update($table)->rows(array(
-                        'attempts' => $attempts,
-                        'available' => time() + $delay,
-                        'last_error' => Typecho_Common::subStr($e->getMessage(), 0, 500, ''),
-                        'updated' => time()
-                    ))->where('qid = ?', (int)$row['qid']));
+                $claimed = $db->query($db->update($table)->rows(array(
+                    'available' => time() + 300,
+                    'updated' => time()
+                ))->where('qid = ?', (int)$row['qid'])->where('available <= ?', time())
+                    ->where('available = ?', (int)$row['available'])->where('attempts = ?', (int)$row['attempts']));
+                if (!$claimed) {
+                    continue;
                 }
-                $result['failed']++;
+                $result['processed']++;
+                $madeProgress = true;
+                try {
+                    $actor = Fediverse_Core::actorByUid((int)$row['uid']);
+                    $activity = json_decode((string)$row['activity'], true, 32);
+                    if (!$actor || !is_array($activity)) {
+                        throw new RuntimeException('Queue actor or activity is unavailable');
+                    }
+                    Fediverse_Http::signedPost((string)$row['inbox'], $activity, $actor);
+                    $db->query($db->delete($table)->where('qid = ?', (int)$row['qid']));
+                    $result['sent']++;
+                } catch (Throwable $e) {
+                    $attempts = (int)$row['attempts'] + 1;
+                    if ($attempts >= 8) {
+                        $db->query($db->update($table)->rows(array(
+                            'attempts' => 8,
+                            'available' => 2147483647,
+                            'last_error' => Typecho_Common::subStr($e->getMessage(), 0, 500, ''),
+                            'updated' => time()
+                        ))->where('qid = ?', (int)$row['qid']));
+                    } else {
+                        $delay = min(21600, 60 * (2 ** ($attempts - 1)));
+                        $db->query($db->update($table)->rows(array(
+                            'attempts' => $attempts,
+                            'available' => time() + $delay,
+                            'last_error' => Typecho_Common::subStr($e->getMessage(), 0, 500, ''),
+                            'updated' => time()
+                        ))->where('qid = ?', (int)$row['qid']));
+                    }
+                    $result['failed']++;
+                }
             }
         }
         return $result;
@@ -252,13 +283,32 @@ class Fediverse_Queue
 
     private static function fanOut($uid, $activity)
     {
+        return self::enqueueActivity($uid, $activity);
+    }
+
+    public static function enqueueActivity($uid, $activity, $additionalInboxes = array())
+    {
         $db = Typecho_Db::get();
-        $followers = $db->fetchAll($db->select('inbox', 'shared_inbox')
+        $followers = $db->fetchAll($db->select('actor', 'inbox', 'shared_inbox')
             ->from(Fediverse_Database::table('followers'))
             ->where('uid = ?', (int)$uid)->where('state = ?', 'accepted'));
+        $blocked = array();
+        foreach ($db->fetchAll($db->select('actor')->from(Fediverse_Database::table('moderation'))
+            ->where('uid = ?', (int)$uid)->where('mode = ?', 'blocked')) as $row) {
+            $blocked[(string)$row['actor']] = true;
+        }
         $inboxes = array();
         foreach ($followers as $follower) {
+            if (isset($blocked[(string)$follower['actor']])) {
+                continue;
+            }
             $inbox = trim((string)($follower['shared_inbox'] ?: $follower['inbox']));
+            if ($inbox !== '') {
+                $inboxes[$inbox] = true;
+            }
+        }
+        foreach ((array)$additionalInboxes as $inbox) {
+            $inbox = trim((string)$inbox);
             if ($inbox !== '') {
                 $inboxes[$inbox] = true;
             }

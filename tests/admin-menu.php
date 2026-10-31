@@ -131,9 +131,9 @@ $manage = array_values(array_filter(
 assertMenu(count($manage) === 1 && $manage[0][0] === '联邦管理', 'The legacy panel must be renamed once');
 
 $children = array_values($table['child'][10] ?? array());
-assertMenu(count($children) === 3, 'The Fediverse menu must have three child panels');
+assertMenu(count($children) === 4, 'The Fediverse menu must have four child panels');
 assertMenu(
-    array_column($children, 0) === array('时间轴', '关注者', '正在关注'),
+    array_column($children, 0) === array('通知', '时间轴', '关注者', '正在关注'),
     'Fediverse child panels must keep the requested order'
 );
 

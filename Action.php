@@ -67,6 +67,16 @@ class Fediverse_Action extends Typecho_Widget
         $this->respond($note, 'application/activity+json');
     }
 
+    public function comment()
+    {
+        $note = Fediverse_Comments::object((int)$this->request->get('coid', 0));
+        if (!$note || !Fediverse_Core::isEnabled()) {
+            $this->error(404, 'Comment not found');
+        }
+        $note = array('@context' => Fediverse_ActivityPub::CONTEXT) + $note;
+        $this->respond($note, 'application/activity+json');
+    }
+
     public function reply()
     {
         $note = Fediverse_Client::replyObject((string)$this->request->get('token', ''));

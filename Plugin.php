@@ -13,16 +13,19 @@ require_once __DIR__ . '/AdminAction.php';
  *
  * @package Fediverse
  * @author Typecho Community
- * @version 0.6.3
+ * @version 0.7.0
  * @link https://www.w3.org/TR/activitypub/
  */
 class Fediverse_Plugin implements Typecho_Plugin_Interface
 {
+    private static $pendingComment;
+
     private const PANEL = 'Fediverse/manage.php';
     private const ADMIN_MENU = '联邦宇宙';
     private const ADMIN_ACTION = 'fediverse-admin';
 
     private const SOCIAL_PANELS = array(
+        'Fediverse/notifications.php' => array('通知', '查看关注、回复、点赞和转发通知'),
         'Fediverse/timeline.php' => array('时间轴', '浏览已关注账号的最新内容'),
         'Fediverse/followers.php' => array('关注者', '管理本站作者的远端关注者'),
         'Fediverse/following.php' => array('正在关注', '管理本站作者正在关注的账号')
@@ -39,6 +42,7 @@ class Fediverse_Plugin implements Typecho_Plugin_Interface
         'fediverse_followers' => array('/fediverse/author/[username:alpha]/followers', 'followers'),
         'fediverse_following' => array('/fediverse/author/[username:alpha]/following', 'following'),
         'fediverse_object' => array('/fediverse/post/[cid:digital]', 'object'),
+        'fediverse_comment' => array('/fediverse/comment/[coid:digital]', 'comment'),
         'fediverse_reply' => array('/fediverse/reply/[token:alpha]', 'reply'),
         'fediverse_cron' => array('/fediverse/cron/[token:alpha]', 'cron')
     );
@@ -67,6 +71,12 @@ class Fediverse_Plugin implements Typecho_Plugin_Interface
         Typecho_Plugin::factory('Widget_Contents_Post_Edit')->finishPublish = array(__CLASS__, 'publishPost');
         Typecho_Plugin::factory('Widget_Contents_Post_Edit')->finishMark = array(__CLASS__, 'markPost');
         Typecho_Plugin::factory('Widget_Contents_Post_Edit')->finishDelete = array(__CLASS__, 'deletePost');
+        Typecho_Plugin::factory('Widget_Feedback')->finishComment = array(__CLASS__, 'publishComment');
+        Typecho_Plugin::factory('Widget_Comments_Edit')->comment = array(__CLASS__, 'captureComment');
+        Typecho_Plugin::factory('Widget_Comments_Edit')->finishComment = array(__CLASS__, 'publishComment');
+        Typecho_Plugin::factory('Widget_Comments_Edit')->finishEdit = array(__CLASS__, 'editComment');
+        Typecho_Plugin::factory('Widget_Comments_Edit')->mark = array(__CLASS__, 'markComment');
+        Typecho_Plugin::factory('Widget_Comments_Edit')->finishDelete = array(__CLASS__, 'deleteComment');
 
         return _t('Fediverse 已启用。首次使用必须填写联邦域名；自动投递默认启用，Cron 可作为低流量站点的重试保障。');
     }
@@ -96,7 +106,8 @@ class Fediverse_Plugin implements Typecho_Plugin_Interface
         $routingTable = Fediverse_Core::options()->routingTable;
         $upgrades = array(
             'fediverse_following' => 'fediverse_followers',
-            'fediverse_reply' => 'fediverse_object'
+            'fediverse_reply' => 'fediverse_object',
+            'fediverse_comment' => 'fediverse_object'
         );
         foreach ($upgrades as $name => $after) {
             if (!isset($routingTable[$name])) {
@@ -475,6 +486,53 @@ class Fediverse_Plugin implements Typecho_Plugin_Interface
     {
         if (Fediverse_Core::isEnabled()) {
             Fediverse_Queue::enqueuePost((int)$cid, 'delete');
+        }
+    }
+
+    public static function captureComment($comment, $widget)
+    {
+        self::$pendingComment = is_array($comment) ? $comment : null;
+    }
+
+    public static function publishComment($widget)
+    {
+        if (self::$pendingComment !== null) {
+            $coid = Fediverse_Comments::findInserted(self::$pendingComment);
+            self::$pendingComment = null;
+        } else {
+            $coid = (int)($widget->coid ?? 0);
+        }
+        if ($coid > 0) {
+            Fediverse_Comments::enqueue($coid, 'create');
+        }
+    }
+
+    public static function editComment($widget)
+    {
+        $coid = (int)($widget->coid ?? 0);
+        if ($coid > 0) {
+            Fediverse_Comments::enqueue($coid, 'update');
+        }
+    }
+
+    public static function markComment($comment, $widget, $status)
+    {
+        if (!is_array($comment) || strcasecmp((string)($comment['agent'] ?? ''), 'ActivityPub') === 0) {
+            return;
+        }
+        $current = (string)($comment['status'] ?? '');
+        $status = (string)$status;
+        if ($current !== 'approved' && $status === 'approved') {
+            Fediverse_Comments::enqueue((int)($comment['coid'] ?? 0), 'create', true);
+        } elseif ($current === 'approved' && $status !== 'approved') {
+            Fediverse_Comments::enqueue((int)($comment['coid'] ?? 0), 'delete');
+        }
+    }
+
+    public static function deleteComment($comment, $widget)
+    {
+        if (is_array($comment) && strcasecmp((string)($comment['agent'] ?? ''), 'ActivityPub') !== 0) {
+            Fediverse_Comments::enqueue((int)($comment['coid'] ?? 0), 'delete');
         }
     }
 }

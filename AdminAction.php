@@ -84,6 +84,16 @@ class Fediverse_AdminAction extends Typecho_Widget implements Widget_Interface_D
                     $count = Fediverse_Client::unfollow((int)$this->request->get('id', 0));
                     $this->notice(_t('已取消 %d 个远端关注。', $count), 'success');
                     break;
+                case 'moderate-actor':
+                    $mode = (string)$this->request->get('mode', '');
+                    Fediverse_Client::setModeration(
+                        (int)$this->request->get('uid', 0),
+                        (string)$this->request->get('actor', ''),
+                        $mode
+                    );
+                    $labels = array('muted' => _t('已静音远端账号。'), 'blocked' => _t('已屏蔽远端账号。'));
+                    $this->notice($labels[$mode] ?? _t('已取消本地限制。'), 'success');
+                    break;
                 case 'timeline-like':
                 case 'timeline-unlike':
                     $active = Fediverse_Client::toggleInteraction(
@@ -109,6 +119,14 @@ class Fediverse_AdminAction extends Typecho_Widget implements Widget_Interface_D
                     );
                     $this->notice(_t('回复已加入投递队列。'), 'success');
                     break;
+                case 'timeline-bookmark':
+                    $bookmarked = Fediverse_Client::toggleBookmark((int)$this->request->get('tid', 0));
+                    $this->notice($bookmarked ? _t('已收藏到本地。') : _t('已取消本地收藏。'), 'success');
+                    break;
+                case 'mark-notifications-read':
+                    $count = Fediverse_Notifications::markAllRead();
+                    $this->notice(_t('已将 %d 条通知标记为已读。', $count), 'success');
+                    break;
                 default:
                     $this->notice(_t('未知的联邦管理操作。'), 'error');
             }
@@ -116,9 +134,10 @@ class Fediverse_AdminAction extends Typecho_Widget implements Widget_Interface_D
             $this->notice(_t('操作失败：%s', $e->getMessage()), 'error');
         }
 
-        $views = array('overview', 'queue', 'followers', 'following', 'timeline', 'activities');
+        $views = array('overview', 'queue', 'notifications', 'followers', 'following', 'timeline', 'activities');
         $view = (string)$this->request->get('view', 'overview');
         $socialPanels = array(
+            'notifications' => 'Fediverse%2Fnotifications.php',
             'timeline' => 'Fediverse%2Ftimeline.php',
             'followers' => 'Fediverse%2Ffollowers.php',
             'following' => 'Fediverse%2Ffollowing.php'
@@ -130,6 +149,23 @@ class Fediverse_AdminAction extends Typecho_Widget implements Widget_Interface_D
         }
         if (!isset($socialPanels[$view]) && in_array($view, $views, true) && $view !== 'overview') {
             $query .= '&view=' . rawurlencode($view);
+        }
+        if ($view === 'timeline') {
+            $page = max(1, (int)$this->request->get('page', 1));
+            $uid = max(0, (int)$this->request->get('uid', 0));
+            $search = trim((string)$this->request->get('q', ''));
+            if ($page > 1) {
+                $query .= '&page=' . $page;
+            }
+            if ($uid > 0) {
+                $query .= '&uid=' . $uid;
+            }
+            if ($search !== '') {
+                $query .= '&q=' . rawurlencode(Typecho_Common::subStr($search, 0, 100, ''));
+            }
+            if ((int)$this->request->get('bookmarked', 0) === 1) {
+                $query .= '&bookmarked=1';
+            }
         }
         $this->response->redirect(Typecho_Common::url($query, Typecho_Widget::widget('Widget_Options')->adminUrl));
     }

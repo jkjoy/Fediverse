@@ -23,7 +23,7 @@ $formatTime = static function ($timestamp) {
 $count = static function ($table, $where = null, $value = null) use ($db) {
     $query = $db->select(array('COUNT(*)' => 'num'))->from($table);
     if ($where !== null) {
-        $query->where($where, $value);
+        str_contains((string)$where, '?') ? $query->where($where, $value) : $query->where($where);
     }
     $row = $db->fetchRow($query);
     return (int)($row['num'] ?? 0);
@@ -35,6 +35,11 @@ $queueTable = Fediverse_Database::table('queue');
 $activitiesTable = Fediverse_Database::table('activities');
 $followingsTable = Fediverse_Database::table('followings');
 $timelineTable = Fediverse_Database::table('timeline');
+$timelineMetaTable = Fediverse_Database::table('timeline_meta');
+$moderationTable = Fediverse_Database::table('moderation');
+$notificationsTable = Fediverse_Database::table('notifications');
+$bookmarksTable = Fediverse_Database::table('bookmarks');
+$remoteActorsTable = Fediverse_Database::table('remote_actors');
 
 $users = $db->fetchAll($db->select('uid', 'name', 'screenName')->from('table.users')->order('uid', Typecho_Db::SORT_ASC));
 $actors = $db->fetchAll($db->select()->from($actorsTable));
@@ -46,6 +51,12 @@ $userMap = array();
 foreach ($users as $localUser) {
     $userMap[(int)$localUser['uid']] = $localUser;
 }
+$moderationRows = $db->fetchAll($db->select()->from($moderationTable)
+    ->order('updated', Typecho_Db::SORT_DESC)->limit(500));
+$moderationMap = array();
+foreach ($moderationRows as $moderation) {
+    $moderationMap[(int)$moderation['uid'] . ':' . (string)$moderation['actor_hash']] = (string)$moderation['mode'];
+}
 
 $stats = array(
     'authors' => count($actors),
@@ -53,17 +64,23 @@ $stats = array(
     'following' => $count($followingsTable, 'state = ?', 'accepted'),
     'queued' => $count($queueTable),
     'failed' => $count($queueTable, 'attempts >= ?', 8),
-    'inbound' => $count($activitiesTable)
+    'inbound' => $count($activitiesTable),
+    'unread' => $count($notificationsTable, 'read_at IS NULL')
 );
 
-$views = array('overview', 'queue', 'followers', 'following', 'timeline', 'activities');
+$views = array('overview', 'queue', 'notifications', 'followers', 'following', 'timeline', 'activities');
 $view = isset($fediverseView) ? (string)$fediverseView : (string)$request->get('view', 'overview');
 if (!in_array($view, $views, true)) {
     $view = 'overview';
 }
-$isSocialView = in_array($view, array('followers', 'following', 'timeline'), true);
+$isSocialView = in_array($view, array('notifications', 'followers', 'following', 'timeline'), true);
+$timelinePage = max(1, (int)$request->get('page', 1));
+$timelineUid = max(0, (int)$request->get('uid', 0));
+$timelineSearch = trim(Typecho_Common::subStr((string)$request->get('q', ''), 0, 100, ''));
+$timelineBookmarked = (int)$request->get('bookmarked', 0) === 1;
 $panelUrl = static function ($target = 'overview') use ($options) {
     $socialPanels = array(
+        'notifications' => 'Fediverse%2Fnotifications.php',
         'timeline' => 'Fediverse%2Ftimeline.php',
         'followers' => 'Fediverse%2Ffollowers.php',
         'following' => 'Fediverse%2Ffollowing.php'
@@ -77,9 +94,31 @@ $panelUrl = static function ($target = 'overview') use ($options) {
     }
     return Typecho_Common::url($query, $options->adminUrl);
 };
-$actionUrl = static function ($query, $returnView = null) use ($security, $view) {
+$actionUrl = static function ($query, $returnView = null) use (
+    $security,
+    $view,
+    $timelinePage,
+    $timelineUid,
+    $timelineSearch,
+    $timelineBookmarked
+) {
     $returnView = $returnView === null ? $view : (string)$returnView;
-    return $security->getIndex('/action/fediverse-admin?' . ltrim((string)$query, '?') . '&view=' . rawurlencode($returnView));
+    $query = ltrim((string)$query, '?') . '&view=' . rawurlencode($returnView);
+    if ($returnView === 'timeline') {
+        if ($timelinePage > 1) {
+            $query .= '&page=' . $timelinePage;
+        }
+        if ($timelineUid > 0) {
+            $query .= '&uid=' . $timelineUid;
+        }
+        if ($timelineSearch !== '') {
+            $query .= '&q=' . rawurlencode($timelineSearch);
+        }
+        if ($timelineBookmarked) {
+            $query .= '&bookmarked=1';
+        }
+    }
+    return $security->getIndex('/action/fediverse-admin?' . $query);
 };
 $activityTypeLabel = static function ($type) {
     $labels = array(
@@ -110,12 +149,42 @@ $activityStatus = static function ($status) {
     );
     return $labels[$status] ?? array($status, 'warn', 0);
 };
-$actorLabel = static function ($actor) {
+$remoteActorMap = array();
+$actorLabel = static function ($actor) use (&$remoteActorMap) {
     $actor = (string)$actor;
+    $cached = $remoteActorMap[hash('sha256', $actor)] ?? null;
     $host = (string)parse_url($actor, PHP_URL_HOST);
     $path = trim((string)parse_url($actor, PHP_URL_PATH), '/');
-    $username = $path !== '' ? rawurldecode((string)basename($path)) : '';
-    return $username !== '' && $host !== '' ? '@' . $username . '@' . $host : ($host ?: $actor);
+    $username = (string)($cached['username'] ?? '');
+    if ($username === '') {
+        $username = $path !== '' ? rawurldecode((string)basename($path)) : '';
+    }
+    $account = $username !== '' && $host !== '' ? '@' . $username . '@' . $host : ($host ?: $actor);
+    $name = trim((string)($cached['name'] ?? ''));
+    return $name !== '' && $name !== $account ? $name . ' (' . $account . ')' : $account;
+};
+$moderationMode = static function ($uid, $actor) use ($moderationMap) {
+    return $moderationMap[(int)$uid . ':' . hash('sha256', (string)$actor)] ?? '';
+};
+$visibilityLabel = static function ($visibility) {
+    $labels = array(
+        'public' => _t('公开'),
+        'unlisted' => _t('不列出'),
+        'followers' => _t('仅关注者'),
+        'unknown' => _t('受限')
+    );
+    return $labels[(string)$visibility] ?? $labels['unknown'];
+};
+$notificationLabel = static function ($type) {
+    $labels = array(
+        'Follow' => _t('开始关注你'),
+        'Accept' => _t('接受了你的关注请求'),
+        'Reject' => _t('拒绝了你的关注请求'),
+        'Reply' => _t('回复了你的文章或评论'),
+        'Like' => _t('赞了你的文章'),
+        'Announce' => _t('转发了你的文章')
+    );
+    return $labels[(string)$type] ?? (string)$type;
 };
 
 include 'header.php';
@@ -124,7 +193,7 @@ include 'menu.php';
 
 <style>
 html{-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
-.fed-status{display:grid;grid-template-columns:repeat(6,minmax(100px,1fr));margin:16px 0 18px;border-top:1px solid #d9d9d6;border-bottom:1px solid #d9d9d6;background:#fafafa}
+.fed-status{display:grid;grid-template-columns:repeat(7,minmax(100px,1fr));margin:16px 0 18px;border-top:1px solid #d9d9d6;border-bottom:1px solid #d9d9d6;background:#fafafa}
 .fed-stat{padding:13px 14px;border-right:1px solid #e5e5e2}
 .fed-stat:last-child{border-right:0}
 .fed-stat strong{display:block;font-size:22px;line-height:1.2;color:#262626;font-variant-numeric:tabular-nums}
@@ -162,6 +231,14 @@ html{-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
 .fed-field label{display:block;margin-bottom:5px;color:#555;font-size:12px;font-weight:600}
 .fed-field input,.fed-field select{width:100%;min-height:40px;box-sizing:border-box}
 .fed-follow-form .btn{min-height:40px;box-sizing:border-box}
+.fed-timeline-filter{display:grid;grid-template-columns:minmax(150px,220px) minmax(220px,1fr) auto auto auto;gap:10px;align-items:end;margin:14px 0 18px;padding:12px 0;border-top:1px solid #eee;border-bottom:1px solid #eee}
+.fed-timeline-filter .btn{min-height:40px;box-sizing:border-box}
+.fed-timeline-filter>a,.fed-filter-check{display:inline-flex;align-items:center;min-height:40px;box-sizing:border-box}
+.fed-filter-check{white-space:nowrap;color:#555}
+.fed-pagination{display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:12px;padding:16px 0;color:#777;font-size:12px}
+.fed-pagination a{display:inline-flex;align-items:center;min-height:40px}
+.fed-pagination a:last-child{justify-self:end}
+.fed-pagination strong{font-weight:400;text-align:center}
 .fed-feed{border-top:1px solid #e5e5e2}
 .fed-feed-item{padding:17px 0;border-bottom:1px solid #e5e5e2}
 .fed-feed-head{display:flex;align-items:flex-start;gap:12px}
@@ -169,6 +246,22 @@ html{-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
 .fed-feed-identity strong,.fed-feed-identity a{overflow-wrap:anywhere}
 .fed-feed-time{flex:0 0 auto;color:#888;font-size:12px;font-variant-numeric:tabular-nums}
 .fed-feed-content{margin:10px 0;color:#333;font-size:14px;line-height:1.75;white-space:normal;overflow-wrap:anywhere}
+.fed-feed-context{margin:10px 0 0;padding:8px 10px;border-left:3px solid #d8d8d4;background:#f7f7f5;color:#666;line-height:1.55;overflow-wrap:anywhere}
+.fed-feed-context strong{display:block;margin-bottom:2px;color:#444;font-size:12px}
+.fed-feed-boost{margin:0 0 8px;color:#666;font-size:12px;overflow-wrap:anywhere}
+.fed-feed-warning{margin:10px 0 0;border-left:3px solid #c79a38;background:#fff8e8}
+.fed-feed-warning summary{padding:8px 10px;color:#654b16;font-weight:600;cursor:pointer}
+.fed-feed-warning .fed-feed-content{margin:0;padding:2px 10px 10px}
+.fed-feed-media{display:grid;gap:6px;margin:10px 0;padding:0;list-style:none}
+.fed-feed-media a{overflow-wrap:anywhere}
+.fed-feed-tags{display:flex;gap:8px;flex-wrap:wrap;margin:8px 0;color:#666;font-size:12px}
+.fed-feed-poll{margin:12px 0;padding:10px 0;border-top:1px solid #e5e5e2;border-bottom:1px solid #e5e5e2}
+.fed-poll-option{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;margin:7px 0;font-size:13px}
+.fed-poll-track{grid-column:1/-1;height:4px;background:#e6e6e2;overflow:hidden}
+.fed-poll-track span{display:block;height:100%;background:#467b96}
+.fed-poll-meta{margin-top:8px;color:#777;font-size:12px}
+.fed-moderation{display:inline-flex;gap:10px;align-items:center;flex-wrap:wrap}
+.fed-notification-unread td:first-child{border-left:3px solid #467b96}
 .fed-feed-actions{display:flex;align-items:center;gap:14px;min-height:40px;flex-wrap:wrap}
 .fed-feed-actions>a,.fed-reply summary{display:inline-flex;align-items:center;min-height:40px;color:#467b96;cursor:pointer}
 .fed-feed-actions .is-active{color:#8a3f64;font-weight:600}
@@ -188,10 +281,10 @@ html{-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
 .fed-tabs a{display:inline-flex;align-items:center;min-height:40px;box-sizing:border-box}
 .fed-status,.typecho-list-table{font-variant-numeric:tabular-nums}
 .typecho-table-wrap{overflow-x:auto}
-.fed-actions a:focus-visible,.fed-tabs a:focus-visible,.fed-table-actions a:focus-visible,.fed-copy:focus-visible,.fed-feed-actions a:focus-visible,.fed-reply summary:focus-visible,.fed-cron-help>summary:focus-visible{outline:2px solid #467b96;outline-offset:2px}
+.fed-actions a:focus-visible,.fed-tabs a:focus-visible,.fed-table-actions a:focus-visible,.fed-copy:focus-visible,.fed-feed-actions a:focus-visible,.fed-reply summary:focus-visible,.fed-cron-help>summary:focus-visible,.fed-pagination a:focus-visible{outline:2px solid #467b96;outline-offset:2px}
 .fed-live{position:fixed;right:20px;bottom:20px;z-index:1000;padding:9px 12px;border-radius:4px;background:#262626;color:#fff;box-shadow:0 4px 14px rgba(0,0,0,.18)}
 .fed-live[hidden]{display:none}
-@media(max-width:760px){.fed-status{grid-template-columns:repeat(2,minmax(0,1fr))}.fed-stat{border-bottom:1px solid #e5e5e2}.fed-endpoint{grid-template-columns:1fr;gap:0}.typecho-list-table{min-width:760px}.fed-follow-form{grid-template-columns:1fr;align-items:stretch}.fed-feed-head{flex-direction:column;gap:3px}.fed-feed-time{order:2}}
+@media(max-width:760px){.fed-status{grid-template-columns:repeat(2,minmax(0,1fr))}.fed-stat{border-bottom:1px solid #e5e5e2}.fed-endpoint{grid-template-columns:1fr;gap:0}.typecho-list-table{min-width:760px}.fed-follow-form,.fed-timeline-filter{grid-template-columns:1fr;align-items:stretch}.fed-feed-head{flex-direction:column;gap:3px}.fed-feed-time{order:2}.fed-pagination{grid-template-columns:auto 1fr auto}.fed-pagination strong{font-size:11px}}
 </style>
 
 <div class="main">
@@ -206,6 +299,7 @@ html{-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
                     <div class="fed-stat"><strong><?php echo $stats['queued']; ?></strong><span><?php _e('投递任务'); ?></span></div>
                     <div class="fed-stat<?php if ($stats['failed'] > 0): ?> is-error<?php endif; ?>"><strong><?php echo $stats['failed']; ?></strong><span><?php _e('失败任务'); ?></span></div>
                     <div class="fed-stat"><strong><?php echo $stats['inbound']; ?></strong><span><?php _e('入站活动'); ?></span></div>
+                    <div class="fed-stat"><strong><?php echo $stats['unread']; ?></strong><span><?php _e('未读通知'); ?></span></div>
                 </div>
 
                 <?php if (!$isSocialView): ?>
@@ -327,6 +421,59 @@ html{-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
                             </tbody>
                         </table>
                     </div>
+                <?php elseif ($view === 'notifications'): ?>
+                    <?php
+                    $rows = $db->fetchAll($db->select()->from($notificationsTable)
+                        ->order('created', Typecho_Db::SORT_DESC)->limit(100));
+                    $commentIds = array_values(array_unique(array_filter(array_map(
+                        static fn($row) => (string)$row['type'] === 'Reply' ? (int)$row['resource_id'] : 0,
+                        $rows
+                    ))));
+                    $commentCidMap = array();
+                    if ($commentIds) {
+                        foreach ($db->fetchAll($db->select('coid', 'cid')->from('table.comments')
+                            ->where('coid IN ?', $commentIds)) as $commentRow) {
+                            $commentCidMap[(int)$commentRow['coid']] = (int)$commentRow['cid'];
+                        }
+                    }
+                    ?>
+                    <div class="fed-actions">
+                        <a class="btn btn-s fed-action" data-busy="<?php _e('正在标记…'); ?>" href="<?php echo $e($actionUrl('do=mark-notifications-read', 'notifications')); ?>"><?php _e('全部标记为已读'); ?></a>
+                    </div>
+                    <div class="typecho-table-wrap">
+                        <table class="typecho-list-table">
+                            <colgroup><col width="20%"><col width="22%"><col width="34%"><col width="14%"><col></colgroup>
+                            <thead><tr><th><?php _e('本地作者'); ?></th><th><?php _e('远端账号'); ?></th><th><?php _e('通知'); ?></th><th><?php _e('时间'); ?></th><th><?php _e('操作'); ?></th></tr></thead>
+                            <tbody>
+                            <?php foreach ($rows as $row): ?>
+                                <?php
+                                $owner = $userMap[(int)$row['uid']] ?? null;
+                                $commentCid = $commentCidMap[(int)$row['resource_id']] ?? 0;
+                                $targetUrl = (string)$row['actor'];
+                                $targetLabel = _t('查看账号');
+                                $targetExternal = true;
+                                if ((string)$row['type'] === 'Reply' && $commentCid > 0) {
+                                    $targetUrl = Typecho_Common::url('manage-comments.php?cid=' . $commentCid, $options->adminUrl);
+                                    $targetLabel = _t('查看回复');
+                                    $targetExternal = false;
+                                } elseif (in_array((string)$row['type'], array('Like', 'Announce'), true)
+                                    && filter_var((string)$row['object_id'], FILTER_VALIDATE_URL)) {
+                                    $targetUrl = (string)$row['object_id'];
+                                    $targetLabel = _t('查看文章');
+                                }
+                                ?>
+                                <tr<?php if (!$row['read_at']): ?> class="fed-notification-unread"<?php endif; ?>>
+                                    <td><?php echo $owner ? $e($owner['screenName'] ?: $owner['name']) : ('UID ' . (int)$row['uid']); ?></td>
+                                    <td class="fed-break"><a href="<?php echo $e($row['actor']); ?>" target="_blank" rel="noopener noreferrer nofollow"><?php echo $e($actorLabel($row['actor'])); ?></a></td>
+                                    <td><strong><?php echo $e($notificationLabel($row['type'])); ?></strong><?php if (!$row['read_at']): ?> <span class="fed-state warn"><?php _e('未读'); ?></span><?php endif; ?></td>
+                                    <td><?php echo $e($formatTime($row['created'])); ?></td>
+                                    <td><a href="<?php echo $e($targetUrl); ?>"<?php if ($targetExternal): ?> target="_blank" rel="noopener noreferrer nofollow"<?php endif; ?>><?php echo $e($targetLabel); ?></a></td>
+                                </tr>
+                            <?php endforeach; ?>
+                            <?php if (!$rows): ?><tr><td colspan="5"><?php _e('暂无联邦通知'); ?></td></tr><?php endif; ?>
+                            </tbody>
+                        </table>
+                    </div>
                 <?php elseif ($view === 'followers'): ?>
                     <?php $rows = $db->fetchAll($db->select()->from($followersTable)->order('id', Typecho_Db::SORT_DESC)->limit(100)); ?>
                     <div class="typecho-table-wrap">
@@ -336,12 +483,13 @@ html{-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
                             <tbody>
                             <?php foreach ($rows as $row): ?>
                                 <?php $owner = $userMap[(int)$row['uid']] ?? null; ?>
+                                <?php $mode = $moderationMode((int)$row['uid'], (string)$row['actor']); ?>
                                 <tr>
                                     <td><?php echo $owner ? $e($owner['screenName'] ?: $owner['name']) : ('UID ' . (int)$row['uid']); ?></td>
                                     <td class="fed-break"><a href="<?php echo $e($row['actor']); ?>" target="_blank" rel="noopener noreferrer nofollow"><?php echo $e($row['actor']); ?></a></td>
                                     <td class="fed-break"><?php echo $e($row['shared_inbox'] ?: $row['inbox']); ?></td>
                                     <td><?php echo $e($formatTime($row['created'])); ?></td>
-                                    <td><a class="fed-action operate-delete" data-busy="<?php _e('移除中…'); ?>" data-confirm="<?php _e('确认移除此关注者吗？'); ?>" href="<?php echo $e($actionUrl('do=remove-follower&id=' . (int)$row['id'], 'followers')); ?>"><?php _e('移除'); ?></a></td>
+                                    <td class="fed-table-actions"><span class="fed-moderation"><a class="fed-action" data-busy="<?php _e('处理中…'); ?>" data-confirm="<?php _e('确认在本地屏蔽此账号吗？其后续活动将被忽略。'); ?>" href="<?php echo $e($actionUrl('do=moderate-actor&uid=' . (int)$row['uid'] . '&actor=' . rawurlencode((string)$row['actor']) . '&mode=' . ($mode === 'blocked' ? '' : 'blocked'), 'followers')); ?>"><?php echo $mode === 'blocked' ? _t('取消屏蔽') : _t('屏蔽'); ?></a><a class="fed-action operate-delete" data-busy="<?php _e('移除中…'); ?>" data-confirm="<?php _e('确认移除此关注者吗？'); ?>" href="<?php echo $e($actionUrl('do=remove-follower&id=' . (int)$row['id'], 'followers')); ?>"><?php _e('移除'); ?></a></span></td>
                                 </tr>
                             <?php endforeach; ?>
                             <?php if (!$rows): ?><tr><td colspan="5"><?php _e('暂无关注者'); ?></td></tr><?php endif; ?>
@@ -374,37 +522,237 @@ html{-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
                             <tbody>
                             <?php foreach ($rows as $row): ?>
                                 <?php $owner = $userMap[(int)$row['uid']] ?? null; ?>
+                                <?php $mode = $moderationMode((int)$row['uid'], (string)$row['actor']); ?>
                                 <tr>
                                     <td><?php echo $owner ? $e($owner['screenName'] ?: $owner['name']) : ('UID ' . (int)$row['uid']); ?></td>
                                     <td class="fed-break"><strong><?php echo $e($actorLabel($row['actor'])); ?></strong><br><a href="<?php echo $e($row['actor']); ?>" target="_blank" rel="noopener noreferrer nofollow"><?php echo $e($row['actor']); ?></a></td>
-                                    <td><span class="fed-state <?php echo $row['state'] === 'accepted' ? '' : ($row['state'] === 'rejected' ? 'error' : 'warn'); ?>"><?php echo $row['state'] === 'accepted' ? _t('已关注') : ($row['state'] === 'rejected' ? _t('已拒绝') : _t('等待确认')); ?></span></td>
+                                    <td><span class="fed-state <?php echo $mode === 'blocked' || $row['state'] === 'rejected' ? 'error' : ($mode === 'muted' || $row['state'] !== 'accepted' ? 'warn' : ''); ?>"><?php echo $mode === 'blocked' ? _t('已屏蔽') : ($mode === 'muted' ? _t('已静音') : ($row['state'] === 'accepted' ? _t('已关注') : ($row['state'] === 'rejected' ? _t('已拒绝') : _t('等待确认')))); ?></span></td>
                                     <td><?php echo $e($formatTime($row['updated'])); ?></td>
-                                    <td><a class="fed-action operate-delete" data-busy="<?php _e('取消中…'); ?>" data-confirm="<?php _e('确认取消关注此远端账号吗？'); ?>" href="<?php echo $e($actionUrl('do=unfollow-remote&id=' . (int)$row['id'], 'following')); ?>"><?php _e('取消关注'); ?></a></td>
+                                    <td class="fed-table-actions"><span class="fed-moderation"><a class="fed-action" data-busy="<?php _e('处理中…'); ?>" href="<?php echo $e($actionUrl('do=moderate-actor&uid=' . (int)$row['uid'] . '&actor=' . rawurlencode((string)$row['actor']) . '&mode=' . ($mode === 'muted' ? '' : 'muted'), 'following')); ?>"><?php echo $mode === 'muted' ? _t('取消静音') : _t('静音'); ?></a><a class="fed-action" data-busy="<?php _e('处理中…'); ?>" data-confirm="<?php _e('确认在本地屏蔽此账号吗？其后续活动将被忽略。'); ?>" href="<?php echo $e($actionUrl('do=moderate-actor&uid=' . (int)$row['uid'] . '&actor=' . rawurlencode((string)$row['actor']) . '&mode=' . ($mode === 'blocked' ? '' : 'blocked'), 'following')); ?>"><?php echo $mode === 'blocked' ? _t('取消屏蔽') : _t('屏蔽'); ?></a><a class="fed-action operate-delete" data-busy="<?php _e('取消中…'); ?>" data-confirm="<?php _e('确认取消关注此远端账号吗？'); ?>" href="<?php echo $e($actionUrl('do=unfollow-remote&id=' . (int)$row['id'], 'following')); ?>"><?php _e('取消关注'); ?></a></span></td>
                                 </tr>
                             <?php endforeach; ?>
                             <?php if (!$rows): ?><tr><td colspan="5"><?php _e('尚未关注远端账号，可在上方输入完整联邦地址。'); ?></td></tr><?php endif; ?>
                             </tbody>
                         </table>
                     </div>
+                    <?php if ($moderationRows): ?>
+                        <h3><?php _e('本地限制'); ?></h3>
+                        <div class="typecho-table-wrap">
+                            <table class="typecho-list-table">
+                                <colgroup><col width="22%"><col width="46%"><col width="16%"><col></colgroup>
+                                <thead><tr><th><?php _e('本地作者'); ?></th><th><?php _e('远端账号'); ?></th><th><?php _e('状态'); ?></th><th><?php _e('操作'); ?></th></tr></thead>
+                                <tbody>
+                                <?php foreach ($moderationRows as $moderation): ?>
+                                    <?php $owner = $userMap[(int)$moderation['uid']] ?? null; ?>
+                                    <tr>
+                                        <td><?php echo $owner ? $e($owner['screenName'] ?: $owner['name']) : ('UID ' . (int)$moderation['uid']); ?></td>
+                                        <td class="fed-break"><a href="<?php echo $e($moderation['actor']); ?>" target="_blank" rel="noopener noreferrer nofollow"><?php echo $e($actorLabel($moderation['actor'])); ?></a></td>
+                                        <td><span class="fed-state <?php echo $moderation['mode'] === 'blocked' ? 'error' : 'warn'; ?>"><?php echo $moderation['mode'] === 'blocked' ? _t('已屏蔽') : _t('已静音'); ?></span></td>
+                                        <td><a class="fed-action" data-busy="<?php _e('处理中…'); ?>" href="<?php echo $e($actionUrl('do=moderate-actor&uid=' . (int)$moderation['uid'] . '&actor=' . rawurlencode((string)$moderation['actor']) . '&mode=', 'following')); ?>"><?php _e('取消限制'); ?></a></td>
+                                    </tr>
+                                <?php endforeach; ?>
+                                </tbody>
+                            </table>
+                        </div>
+                    <?php endif; ?>
                 <?php elseif ($view === 'timeline'): ?>
-                    <?php $rows = $db->fetchAll($db->select()->from($timelineTable)->where('deleted = ?', 0)->order('published', Typecho_Db::SORT_DESC)->limit(50)); ?>
+                    <?php
+                    $filterTimeline = static function ($query) use (
+                        $bookmarksTable,
+                        $timelineUid,
+                        $timelineSearch,
+                        $timelineBookmarked
+                    ) {
+                        if ($timelineBookmarked) {
+                            $query->join($bookmarksTable . ' b', 'b.tid = t.tid AND b.uid = t.uid');
+                        }
+                        $query->where('t.deleted = ?', 0);
+                        if ($timelineUid > 0) {
+                            $query->where('t.uid = ?', $timelineUid);
+                        }
+                        if ($timelineSearch !== '') {
+                            $like = '%' . $timelineSearch . '%';
+                            $query->where('(t.content LIKE ? OR t.actor LIKE ? OR t.object_id LIKE ?)', $like, $like, $like);
+                        }
+                        return $query;
+                    };
+                    $totalRow = $db->fetchRow($filterTimeline($db->select(array('COUNT(*)' => 'num'))
+                        ->from($timelineTable . ' t')));
+                    $timelineTotal = (int)($totalRow['num'] ?? 0);
+                    $timelinePageSize = 20;
+                    $timelinePages = max(1, (int)ceil($timelineTotal / $timelinePageSize));
+                    $timelinePage = min($timelinePage, $timelinePages);
+                    $rows = $db->fetchAll($filterTimeline($db->select('t.*')->from($timelineTable . ' t'))
+                        ->order('t.published', Typecho_Db::SORT_DESC)->page($timelinePage, $timelinePageSize));
+                    $timelineMetaMap = array();
+                    $timelineIds = array_map('intval', array_column($rows, 'tid'));
+                    if ($timelineIds) {
+                        foreach ($db->fetchAll($db->select()->from($timelineMetaTable)->where('tid IN ?', $timelineIds)) as $metaRow) {
+                            $metaRow['attachments'] = json_decode((string)$metaRow['attachments'], true) ?: array();
+                            $metaRow['tags'] = json_decode((string)$metaRow['tags'], true) ?: array();
+                            $metaRow['poll'] = json_decode((string)$metaRow['poll'], true) ?: array();
+                            $timelineMetaMap[(int)$metaRow['tid']] = $metaRow;
+                        }
+                    }
+                    $bookmarkMap = array();
+                    if ($timelineIds) {
+                        foreach ($db->fetchAll($db->select('uid', 'tid')->from($bookmarksTable)
+                            ->where('tid IN ?', $timelineIds)) as $bookmarkRow) {
+                            $bookmarkMap[(int)$bookmarkRow['uid'] . ':' . (int)$bookmarkRow['tid']] = true;
+                        }
+                    }
+                    $remoteActorHashes = array();
+                    foreach ($rows as $timelineRow) {
+                        $remoteActorHashes[] = hash('sha256', (string)$timelineRow['actor']);
+                        $announcedActor = (string)($timelineMetaMap[(int)$timelineRow['tid']]['announced_actor'] ?? '');
+                        if ($announcedActor !== '') {
+                            $remoteActorHashes[] = hash('sha256', $announcedActor);
+                        }
+                    }
+                    $remoteActorHashes = array_values(array_unique($remoteActorHashes));
+                    if ($remoteActorHashes) {
+                        foreach ($db->fetchAll($db->select()->from($remoteActorsTable)
+                            ->where('actor_hash IN ?', $remoteActorHashes)) as $remoteActor) {
+                            $remoteActorMap[(string)$remoteActor['actor_hash']] = $remoteActor;
+                        }
+                    }
+                    $timelineReplyMap = array();
+                    $timelineParentMap = array();
+                    $timelineObjectIds = array_values(array_unique(array_column($rows, 'object_id')));
+                    if ($timelineObjectIds) {
+                        $activityRows = $db->fetchAll($db->select('object_id', 'payload')->from($activitiesTable)
+                            ->where('object_id IN ?', $timelineObjectIds)->where('type IN ?', array('Create', 'Update'))
+                            ->order('aid', Typecho_Db::SORT_DESC));
+                        foreach ($activityRows as $activityRow) {
+                            $objectId = (string)$activityRow['object_id'];
+                            if (isset($timelineReplyMap[$objectId])) {
+                                continue;
+                            }
+                            $payload = json_decode((string)$activityRow['payload'], true);
+                            $object = is_array($payload['object'] ?? null) ? $payload['object'] : array();
+                            $replyValue = $object['inReplyTo'] ?? '';
+                            $replyTo = is_array($replyValue) ? (string)($replyValue['id'] ?? '') : (string)$replyValue;
+                            if (str_starts_with(strtolower($replyTo), 'https://')
+                                && filter_var($replyTo, FILTER_VALIDATE_URL)) {
+                                $timelineReplyMap[$objectId] = $replyTo;
+                            }
+                        }
+                        $replyTargets = array_values(array_unique(array_values($timelineReplyMap)));
+                        if ($replyTargets) {
+                            foreach ($db->fetchAll($db->select('object_id', 'actor', 'url', 'content')->from($timelineTable)
+                                ->where('object_id IN ?', $replyTargets)->where('deleted = ?', 0)) as $parentRow) {
+                                $timelineParentMap[(string)$parentRow['object_id']] = $parentRow;
+                            }
+                        }
+                    }
+                    $timelinePageUrl = static function ($page) use (
+                        $options,
+                        $timelineUid,
+                        $timelineSearch,
+                        $timelineBookmarked
+                    ) {
+                        $query = 'extending.php?panel=Fediverse%2Ftimeline.php&page=' . max(1, (int)$page);
+                        if ($timelineUid > 0) {
+                            $query .= '&uid=' . $timelineUid;
+                        }
+                        if ($timelineSearch !== '') {
+                            $query .= '&q=' . rawurlencode($timelineSearch);
+                        }
+                        if ($timelineBookmarked) {
+                            $query .= '&bookmarked=1';
+                        }
+                        return Typecho_Common::url($query, $options->adminUrl);
+                    };
+                    ?>
+                    <form class="fed-timeline-filter" method="get" action="<?php echo $e(Typecho_Common::url('extending.php', $options->adminUrl)); ?>">
+                        <input type="hidden" name="panel" value="Fediverse/timeline.php">
+                        <div class="fed-field">
+                            <label for="fed-timeline-uid"><?php _e('本地作者'); ?></label>
+                            <select id="fed-timeline-uid" name="uid">
+                                <option value="0"><?php _e('全部作者'); ?></option>
+                                <?php foreach ($users as $localUser): ?>
+                                    <option value="<?php echo (int)$localUser['uid']; ?>"<?php if ($timelineUid === (int)$localUser['uid']): ?> selected<?php endif; ?>><?php echo $e($localUser['screenName'] ?: $localUser['name']); ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+                        <div class="fed-field">
+                            <label for="fed-timeline-search"><?php _e('搜索内容或账号'); ?></label>
+                            <input id="fed-timeline-search" name="q" type="search" maxlength="100" value="<?php echo $e($timelineSearch); ?>">
+                        </div>
+                        <label class="fed-filter-check"><input type="checkbox" name="bookmarked" value="1"<?php if ($timelineBookmarked): ?> checked<?php endif; ?>> <?php _e('仅收藏'); ?></label>
+                        <button class="btn btn-s" type="submit"><?php _e('筛选'); ?></button>
+                        <?php if ($timelineUid > 0 || $timelineSearch !== '' || $timelineBookmarked): ?><a href="<?php echo $e($panelUrl('timeline')); ?>"><?php _e('清除'); ?></a><?php endif; ?>
+                    </form>
                     <?php if ($rows): ?>
                         <div class="fed-feed" aria-label="<?php _e('联邦时间轴'); ?>">
                             <?php foreach ($rows as $row): ?>
                                 <?php $owner = $userMap[(int)$row['uid']] ?? null; ?>
+                                <?php $meta = $timelineMetaMap[(int)$row['tid']] ?? array('summary' => '', 'sensitive' => 0, 'attachments' => array(), 'tags' => array(), 'poll' => array(), 'visibility' => 'unknown', 'announced_actor' => ''); ?>
+                                <?php $mode = $moderationMode((int)$row['uid'], (string)$row['actor']); ?>
+                                <?php $cachedActor = $remoteActorMap[hash('sha256', (string)$row['actor'])] ?? array(); ?>
+                                <?php $profileUrl = (string)($cachedActor['profile_url'] ?? $row['actor']); ?>
+                                <?php $bookmarked = isset($bookmarkMap[(int)$row['uid'] . ':' . (int)$row['tid']]); ?>
                                 <article class="fed-feed-item">
+                                    <?php if ((string)$meta['announced_actor'] !== ''): ?>
+                                        <div class="fed-feed-boost"><?php echo $e(_t('%s 转发了此内容', $actorLabel($meta['announced_actor']))); ?></div>
+                                    <?php endif; ?>
                                     <header class="fed-feed-head">
                                         <div class="fed-feed-identity">
-                                            <strong><a href="<?php echo $e($row['actor']); ?>" target="_blank" rel="noopener noreferrer nofollow"><?php echo $e($actorLabel($row['actor'])); ?></a></strong>
-                                            <div class="fed-muted"><?php echo $owner ? $e(_t('投递给 %s', $owner['screenName'] ?: $owner['name'])) : ('UID ' . (int)$row['uid']); ?> · <?php echo $e($row['object_type']); ?></div>
+                                            <strong><a href="<?php echo $e($profileUrl); ?>" target="_blank" rel="noopener noreferrer nofollow"><?php echo $e($actorLabel($row['actor'])); ?></a></strong>
+                                            <div class="fed-muted"><?php echo $owner ? $e(_t('投递给 %s', $owner['screenName'] ?: $owner['name'])) : ('UID ' . (int)$row['uid']); ?> · <?php echo $e($row['object_type']); ?> · <?php echo $e($visibilityLabel($meta['visibility'])); ?><?php if (!empty($cachedActor['avatar_url'])): ?> · <a href="<?php echo $e($cachedActor['avatar_url']); ?>" target="_blank" rel="noopener noreferrer nofollow"><?php _e('头像'); ?></a><?php endif; ?></div>
                                         </div>
                                         <time class="fed-feed-time" datetime="<?php echo $e(Fediverse_Core::iso8601((int)$row['published'])); ?>"><?php echo $e($formatTime($row['published'])); ?></time>
                                     </header>
-                                    <div class="fed-feed-content"><?php echo nl2br($e($row['content']), false); ?></div>
+                                    <?php $replyTo = $timelineReplyMap[(string)$row['object_id']] ?? ''; ?>
+                                    <?php if ($replyTo !== ''): ?>
+                                        <?php $parentRow = $timelineParentMap[$replyTo] ?? null; ?>
+                                        <div class="fed-feed-context">
+                                            <strong><?php echo $parentRow ? $e(_t('回复 %s', $actorLabel($parentRow['actor']))) : _t('回复上文'); ?></strong>
+                                            <?php if ($parentRow): ?><?php echo $e(Typecho_Common::subStr((string)$parentRow['content'], 0, 180, '…')); ?><?php else: ?><a href="<?php echo $e($replyTo); ?>" target="_blank" rel="noopener noreferrer nofollow"><?php _e('查看被回复的内容'); ?></a><?php endif; ?>
+                                        </div>
+                                    <?php endif; ?>
+                                    <?php if ((string)$meta['summary'] !== '' || !empty($meta['sensitive'])): ?>
+                                        <details class="fed-feed-warning">
+                                            <summary><?php echo (string)$meta['summary'] !== '' ? $e($meta['summary']) : _t('敏感内容'); ?></summary>
+                                            <div class="fed-feed-content"><?php echo nl2br($e($row['content']), false); ?></div>
+                                        </details>
+                                    <?php else: ?>
+                                        <div class="fed-feed-content"><?php echo nl2br($e($row['content']), false); ?></div>
+                                    <?php endif; ?>
+                                    <?php if ($meta['attachments']): ?>
+                                        <ul class="fed-feed-media" aria-label="<?php _e('媒体附件'); ?>">
+                                            <?php foreach ($meta['attachments'] as $attachment): ?>
+                                                <li><a href="<?php echo $e($attachment['url']); ?>" target="_blank" rel="noopener noreferrer nofollow"><?php echo $e($attachment['name'] ?: _t('打开%s附件', $attachment['type'])); ?></a><?php if ($attachment['mediaType']): ?> <span class="fed-muted"><?php echo $e($attachment['mediaType']); ?></span><?php endif; ?></li>
+                                            <?php endforeach; ?>
+                                        </ul>
+                                    <?php endif; ?>
+                                    <?php if ($meta['tags']): ?>
+                                        <div class="fed-feed-tags">
+                                            <?php foreach ($meta['tags'] as $tag): ?>
+                                                <?php if ($tag['href']): ?><a href="<?php echo $e($tag['href']); ?>" target="_blank" rel="noopener noreferrer nofollow"><?php echo $e($tag['name']); ?></a><?php else: ?><span><?php echo $e($tag['name']); ?></span><?php endif; ?>
+                                            <?php endforeach; ?>
+                                        </div>
+                                    <?php endif; ?>
+                                    <?php if ($meta['poll']): ?>
+                                        <?php
+                                        $pollVotes = array_sum(array_map(static fn($option) => (int)($option['votes'] ?? 0), $meta['poll']['options'] ?? array()));
+                                        $pollVoters = max(0, (int)($meta['poll']['votersCount'] ?? 0));
+                                        $pollScale = max(1, $pollVotes);
+                                        ?>
+                                        <div class="fed-feed-poll" aria-label="<?php _e('投票'); ?>">
+                                            <?php foreach ((array)($meta['poll']['options'] ?? array()) as $option): ?>
+                                                <?php $percentage = min(100, max(0, (int)round(((int)$option['votes'] / $pollScale) * 100))); ?>
+                                                <div class="fed-poll-option"><span><?php echo $e($option['name']); ?></span><strong><?php echo (int)$option['votes']; ?></strong><div class="fed-poll-track" aria-hidden="true"><span style="width:<?php echo $percentage; ?>%"></span></div></div>
+                                            <?php endforeach; ?>
+                                            <div class="fed-poll-meta"><?php echo $e(_t('%d 票', $pollVotes)); ?><?php if ($pollVoters > 0 && !empty($meta['poll']['multiple'])): ?> · <?php echo $e(_t('%d 人参与', $pollVoters)); ?><?php endif; ?><?php if (!empty($meta['poll']['multiple'])): ?> · <?php _e('可多选'); ?><?php endif; ?><?php if (!empty($meta['poll']['closed'])): ?> · <?php _e('已结束'); ?><?php elseif (!empty($meta['poll']['endTime'])): ?> · <?php echo $e(_t('%s 结束', $formatTime($meta['poll']['endTime']))); ?><?php endif; ?></div>
+                                        </div>
+                                    <?php endif; ?>
                                     <div class="fed-feed-actions">
+                                        <a class="fed-action<?php if ($bookmarked): ?> is-active<?php endif; ?>" data-busy="<?php _e('处理中…'); ?>" href="<?php echo $e($actionUrl('do=timeline-bookmark&tid=' . (int)$row['tid'], 'timeline')); ?>"><?php echo $bookmarked ? _t('取消收藏') : _t('收藏'); ?></a>
                                         <a class="fed-action<?php if ($row['liked_activity']): ?> is-active<?php endif; ?>" data-busy="<?php _e('处理中…'); ?>" href="<?php echo $e($actionUrl('do=' . ($row['liked_activity'] ? 'timeline-unlike' : 'timeline-like') . '&tid=' . (int)$row['tid'], 'timeline')); ?>"><?php echo $row['liked_activity'] ? _t('取消点赞') : _t('点赞'); ?></a>
-                                        <a class="fed-action<?php if ($row['announced_activity']): ?> is-active<?php endif; ?>" data-busy="<?php _e('处理中…'); ?>" href="<?php echo $e($actionUrl('do=' . ($row['announced_activity'] ? 'timeline-unannounce' : 'timeline-announce') . '&tid=' . (int)$row['tid'], 'timeline')); ?>"><?php echo $row['announced_activity'] ? _t('取消转发') : _t('转发'); ?></a>
-                                        <details class="fed-reply">
+                                        <?php if ((string)$meta['visibility'] === 'public'): ?>
+                                            <a class="fed-action<?php if ($row['announced_activity']): ?> is-active<?php endif; ?>" data-busy="<?php _e('处理中…'); ?>" href="<?php echo $e($actionUrl('do=' . ($row['announced_activity'] ? 'timeline-unannounce' : 'timeline-announce') . '&tid=' . (int)$row['tid'], 'timeline')); ?>"><?php echo $row['announced_activity'] ? _t('取消转发') : _t('转发'); ?></a>
+                                            <details class="fed-reply">
                                             <summary><?php _e('回复'); ?></summary>
                                             <form method="post" action="<?php echo $e($actionUrl('do=timeline-reply', 'timeline')); ?>">
                                                 <input type="hidden" name="tid" value="<?php echo (int)$row['tid']; ?>">
@@ -412,14 +760,28 @@ html{-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
                                                 <textarea id="fed-reply-<?php echo (int)$row['tid']; ?>" name="content" maxlength="5000" required></textarea>
                                                 <button class="btn btn-s primary fed-action" data-busy="<?php _e('发送中…'); ?>" type="submit"><?php _e('发送回复'); ?></button>
                                             </form>
-                                        </details>
+                                            </details>
+                                        <?php endif; ?>
+                                        <a class="fed-action" data-busy="<?php _e('处理中…'); ?>" href="<?php echo $e($actionUrl('do=moderate-actor&uid=' . (int)$row['uid'] . '&actor=' . rawurlencode((string)$row['actor']) . '&mode=' . ($mode === 'muted' ? '' : 'muted'), 'timeline')); ?>"><?php echo $mode === 'muted' ? _t('取消静音') : _t('静音'); ?></a>
+                                        <a class="fed-action" data-busy="<?php _e('处理中…'); ?>" data-confirm="<?php _e('确认在本地屏蔽此账号吗？当前时间轴内容将被隐藏，后续活动将被忽略。'); ?>" href="<?php echo $e($actionUrl('do=moderate-actor&uid=' . (int)$row['uid'] . '&actor=' . rawurlencode((string)$row['actor']) . '&mode=' . ($mode === 'blocked' ? '' : 'blocked'), 'timeline')); ?>"><?php echo $mode === 'blocked' ? _t('取消屏蔽') : _t('屏蔽'); ?></a>
                                         <a href="<?php echo $e($row['url']); ?>" target="_blank" rel="noopener noreferrer nofollow"><?php _e('查看原文'); ?></a>
                                     </div>
                                 </article>
                             <?php endforeach; ?>
                         </div>
+                        <?php if ($timelinePages > 1): ?>
+                            <nav class="fed-pagination" aria-label="<?php _e('时间轴分页'); ?>">
+                                <?php if ($timelinePage > 1): ?><a href="<?php echo $e($timelinePageUrl($timelinePage - 1)); ?>"><?php _e('上一页'); ?></a><?php else: ?><span></span><?php endif; ?>
+                                <strong><?php echo $e(_t('第 %d / %d 页，共 %d 条', $timelinePage, $timelinePages, $timelineTotal)); ?></strong>
+                                <?php if ($timelinePage < $timelinePages): ?><a href="<?php echo $e($timelinePageUrl($timelinePage + 1)); ?>"><?php _e('下一页'); ?></a><?php else: ?><span></span><?php endif; ?>
+                            </nav>
+                        <?php endif; ?>
                     <?php else: ?>
-                        <div class="fed-empty"><strong><?php _e('时间轴还是空的'); ?></strong><span><?php _e('关注远端账号并等待对方接受后，新内容会由远端投递到这里。'); ?></span><br><a href="<?php echo $e($panelUrl('following')); ?>"><?php _e('添加关注'); ?></a></div>
+                        <?php if ($timelineUid > 0 || $timelineSearch !== '' || $timelineBookmarked): ?>
+                            <div class="fed-empty"><strong><?php _e('没有符合条件的内容'); ?></strong><a href="<?php echo $e($panelUrl('timeline')); ?>"><?php _e('清除筛选'); ?></a></div>
+                        <?php else: ?>
+                            <div class="fed-empty"><strong><?php _e('时间轴还是空的'); ?></strong><span><?php _e('关注远端账号并等待对方接受后，新内容会由远端投递到这里。'); ?></span><br><a href="<?php echo $e($panelUrl('following')); ?>"><?php _e('添加关注'); ?></a></div>
+                        <?php endif; ?>
                     <?php endif; ?>
                 <?php else: ?>
                     <?php $rows = $db->fetchAll($db->select()->from($activitiesTable)->order('aid', Typecho_Db::SORT_DESC)->limit(100)); ?>

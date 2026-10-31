@@ -6,6 +6,7 @@ class FakeAutoQuery
 {
     public int $limitValue = 0;
     public function from($table) { return $this; }
+    public function join($table, $condition, $operation) { return $this; }
     public function where($condition, ...$values) { return $this; }
     public function order($column, $direction) { return $this; }
     public function limit($limit) { $this->limitValue = (int)$limit; return $this; }
@@ -26,6 +27,7 @@ class FakeAutoDb
 class Typecho_Db
 {
     public const SORT_ASC = 'ASC';
+    public const LEFT_JOIN = 'LEFT';
     public static FakeAutoDb $db;
     public static function get() { return self::$db; }
 }

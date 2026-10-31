@@ -2,8 +2,17 @@
 
 define('__TYPECHO_ROOT_DIR__', dirname(__DIR__));
 
+class Typecho_Common
+{
+    public static function subStr($text, $start, $length, $trim = '')
+    {
+        return substr((string)$text, (int)$start, (int)$length);
+    }
+}
+
 class Typecho_Db
 {
+    public const SORT_ASC = 'ASC';
     public const SORT_DESC = 'DESC';
 
     public static function get()
@@ -38,8 +47,10 @@ class FakeOutboxQuery
     public int $size = 20;
 
     public function from($table) { return $this; }
+    public function join($table, $condition) { return $this; }
     public function where($condition, ...$args) { return $this; }
     public function order($column, $direction) { return $this; }
+    public function limit($size) { $this->size = $size; return $this; }
     public function page($page, $size) { $this->page = $page; $this->size = $size; return $this; }
 }
 

@@ -78,6 +78,27 @@ class Fediverse_Database
             . 'PRIMARY KEY (`tid`), UNIQUE KEY `object_hash` (`object_hash`), KEY `uid_published` (`uid`,`published`), '
             . 'KEY `published` (`published`)'
             . ') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4');
+        $db->query('CREATE TABLE IF NOT EXISTS `' . $p . 'fediverse_timeline_meta` ('
+            . '`tid` int unsigned NOT NULL, `summary` text NOT NULL, `sensitive` tinyint unsigned NOT NULL DEFAULT 0, '
+            . '`attachments` longtext NOT NULL, `tags` longtext NOT NULL, `poll` longtext NOT NULL, '
+            . '`visibility` varchar(16) NOT NULL, `announced_actor` text, '
+            . 'PRIMARY KEY (`tid`)'
+            . ') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4');
+        $db->query('CREATE TABLE IF NOT EXISTS `' . $p . 'fediverse_moderation` ('
+            . '`id` int unsigned NOT NULL AUTO_INCREMENT, `uid` int unsigned NOT NULL, `actor_hash` char(64) NOT NULL, '
+            . '`actor` varchar(512) NOT NULL, `mode` varchar(16) NOT NULL, `created` int unsigned NOT NULL, '
+            . '`updated` int unsigned NOT NULL, PRIMARY KEY (`id`), UNIQUE KEY `uid_actor` (`uid`,`actor_hash`), '
+            . 'KEY `uid_mode` (`uid`,`mode`)'
+            . ') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4');
+        $db->query('CREATE TABLE IF NOT EXISTS `' . $p . 'fediverse_bookmarks` ('
+            . '`uid` int unsigned NOT NULL, `tid` int unsigned NOT NULL, `created` int unsigned NOT NULL, '
+            . 'PRIMARY KEY (`uid`,`tid`), KEY `tid` (`tid`)'
+            . ') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4');
+        $db->query('CREATE TABLE IF NOT EXISTS `' . $p . 'fediverse_remote_actors` ('
+            . '`actor_hash` char(64) NOT NULL, `actor` varchar(512) NOT NULL, `username` varchar(128) NOT NULL, '
+            . '`name` varchar(255) NOT NULL, `avatar_url` text, `profile_url` text, `updated` int unsigned NOT NULL, '
+            . 'PRIMARY KEY (`actor_hash`)'
+            . ') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4');
         $db->query('CREATE TABLE IF NOT EXISTS `' . $p . 'fediverse_replies` ('
             . '`token` char(32) NOT NULL, `uid` int unsigned NOT NULL, `in_reply_to` text NOT NULL, `content` longtext NOT NULL, '
             . '`to_actor` text NOT NULL, `published` int unsigned NOT NULL, `deleted` tinyint unsigned NOT NULL DEFAULT 0, '
@@ -87,6 +108,23 @@ class Fediverse_Database
             . '`object_hash` char(64) NOT NULL, `actor` text NOT NULL, `object_id` text NOT NULL, '
             . '`comment_id` int unsigned NOT NULL, `created` int unsigned NOT NULL, '
             . 'PRIMARY KEY (`object_hash`)'
+            . ') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4');
+        $db->query('CREATE TABLE IF NOT EXISTS `' . $p . 'fediverse_reply_versions` ('
+            . '`object_hash` char(64) NOT NULL, `updated` int unsigned NOT NULL, '
+            . 'PRIMARY KEY (`object_hash`)'
+            . ') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4');
+        $db->query('CREATE TABLE IF NOT EXISTS `' . $p . 'fediverse_notifications` ('
+            . '`nid` int unsigned NOT NULL AUTO_INCREMENT, `uid` int unsigned NOT NULL, `type` varchar(32) NOT NULL, '
+            . '`actor` text NOT NULL, `activity_hash` char(64) NOT NULL, `activity_id` text NOT NULL, `object_id` text, '
+            . '`resource_id` int unsigned NOT NULL DEFAULT 0, `read_at` int unsigned DEFAULT NULL, `created` int unsigned NOT NULL, '
+            . 'PRIMARY KEY (`nid`), UNIQUE KEY `uid_activity` (`uid`,`activity_hash`), '
+            . 'KEY `uid_read_created` (`uid`,`read_at`,`created`)'
+            . ') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4');
+        $db->query('CREATE TABLE IF NOT EXISTS `' . $p . 'fediverse_local_comments` ('
+            . '`coid` int unsigned NOT NULL, `uid` int unsigned NOT NULL, `object_id` varchar(512) NOT NULL, '
+            . '`in_reply_to` text NOT NULL, `to_actor` text, `deleted` tinyint unsigned NOT NULL DEFAULT 0, '
+            . '`created` int unsigned NOT NULL, `updated` int unsigned NOT NULL, '
+            . 'PRIMARY KEY (`coid`)'
             . ') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4');
     }
 
@@ -131,6 +169,25 @@ class Fediverse_Database
             . '"activity_id" text NOT NULL, "object_id" text NOT NULL, "actor" text NOT NULL, "object_type" varchar(32) NOT NULL, '
             . '"url" text, "content" text NOT NULL, "published" integer NOT NULL, "updated" integer NOT NULL, '
             . '"liked_activity" text, "announced_activity" text, "deleted" integer NOT NULL DEFAULT 0)');
+        $db->query('CREATE TABLE IF NOT EXISTS ' . $q('timeline_meta') . ' ('
+            . '"tid" integer PRIMARY KEY, "summary" text NOT NULL, "sensitive" integer NOT NULL DEFAULT 0, '
+            . '"attachments" text NOT NULL, "tags" text NOT NULL, "poll" text NOT NULL, '
+            . '"visibility" varchar(16) NOT NULL, "announced_actor" text)');
+        $db->query('CREATE TABLE IF NOT EXISTS ' . $q('moderation') . ' ('
+            . '"id" serial PRIMARY KEY, "uid" integer NOT NULL, "actor_hash" char(64) NOT NULL, '
+            . '"actor" varchar(512) NOT NULL, "mode" varchar(16) NOT NULL, "created" integer NOT NULL, '
+            . '"updated" integer NOT NULL, UNIQUE ("uid", "actor_hash"))');
+        $db->query('CREATE INDEX IF NOT EXISTS "' . $p . 'fediverse_moderation_uid_mode" ON '
+            . $q('moderation') . ' ("uid", "mode")');
+        $db->query('CREATE TABLE IF NOT EXISTS ' . $q('bookmarks') . ' ('
+            . '"uid" integer NOT NULL, "tid" integer NOT NULL, "created" integer NOT NULL, '
+            . 'PRIMARY KEY ("uid", "tid"))');
+        $db->query('CREATE INDEX IF NOT EXISTS "' . $p . 'fediverse_bookmarks_tid" ON '
+            . $q('bookmarks') . ' ("tid")');
+        $db->query('CREATE TABLE IF NOT EXISTS ' . $q('remote_actors') . ' ('
+            . '"actor_hash" char(64) PRIMARY KEY, "actor" varchar(512) NOT NULL, '
+            . '"username" varchar(128) NOT NULL, "name" varchar(255) NOT NULL, '
+            . '"avatar_url" text, "profile_url" text, "updated" integer NOT NULL)');
         $db->query('CREATE INDEX IF NOT EXISTS "' . $p . 'fediverse_timeline_uid_published" ON '
             . $q('timeline') . ' ("uid", "published")');
         $db->query('CREATE INDEX IF NOT EXISTS "' . $p . 'fediverse_timeline_published" ON '
@@ -141,6 +198,19 @@ class Fediverse_Database
         $db->query('CREATE TABLE IF NOT EXISTS ' . $q('reply_objects') . ' ('
             . '"object_hash" char(64) PRIMARY KEY, "actor" text NOT NULL, "object_id" text NOT NULL, '
             . '"comment_id" integer NOT NULL, "created" integer NOT NULL)');
+        $db->query('CREATE TABLE IF NOT EXISTS ' . $q('reply_versions') . ' ('
+            . '"object_hash" char(64) PRIMARY KEY, "updated" integer NOT NULL)');
+        $db->query('CREATE TABLE IF NOT EXISTS ' . $q('notifications') . ' ('
+            . '"nid" serial PRIMARY KEY, "uid" integer NOT NULL, "type" varchar(32) NOT NULL, "actor" text NOT NULL, '
+            . '"activity_hash" char(64) NOT NULL, "activity_id" text NOT NULL, "object_id" text, '
+            . '"resource_id" integer NOT NULL DEFAULT 0, "read_at" integer, "created" integer NOT NULL, '
+            . 'UNIQUE ("uid", "activity_hash"))');
+        $db->query('CREATE INDEX IF NOT EXISTS "' . $p . 'fediverse_notifications_uid_read_created" ON '
+            . $q('notifications') . ' ("uid", "read_at", "created")');
+        $db->query('CREATE TABLE IF NOT EXISTS ' . $q('local_comments') . ' ('
+            . '"coid" integer PRIMARY KEY, "uid" integer NOT NULL, "object_id" varchar(512) NOT NULL, '
+            . '"in_reply_to" text NOT NULL, "to_actor" text, "deleted" integer NOT NULL DEFAULT 0, '
+            . '"created" integer NOT NULL, "updated" integer NOT NULL)');
     }
 
     private static function installSqlite($db, $p)
@@ -184,6 +254,25 @@ class Fediverse_Database
             . '`activity_id` text NOT NULL, `object_id` text NOT NULL, `actor` text NOT NULL, `object_type` varchar(32) NOT NULL, '
             . '`url` text, `content` text NOT NULL, `published` INTEGER NOT NULL, `updated` INTEGER NOT NULL, '
             . '`liked_activity` text, `announced_activity` text, `deleted` INTEGER NOT NULL DEFAULT 0)');
+        $db->query('CREATE TABLE IF NOT EXISTS ' . $q('timeline_meta') . ' ('
+            . '`tid` INTEGER PRIMARY KEY, `summary` text NOT NULL, `sensitive` INTEGER NOT NULL DEFAULT 0, '
+            . '`attachments` text NOT NULL, `tags` text NOT NULL, `poll` text NOT NULL, '
+            . '`visibility` varchar(16) NOT NULL, `announced_actor` text)');
+        $db->query('CREATE TABLE IF NOT EXISTS ' . $q('moderation') . ' ('
+            . '`id` INTEGER PRIMARY KEY AUTOINCREMENT, `uid` INTEGER NOT NULL, `actor_hash` char(64) NOT NULL, '
+            . '`actor` varchar(512) NOT NULL, `mode` varchar(16) NOT NULL, `created` INTEGER NOT NULL, '
+            . '`updated` INTEGER NOT NULL, UNIQUE (`uid`, `actor_hash`))');
+        $db->query('CREATE INDEX IF NOT EXISTS `' . $p . 'fediverse_moderation_uid_mode` ON '
+            . $q('moderation') . ' (`uid`, `mode`)');
+        $db->query('CREATE TABLE IF NOT EXISTS ' . $q('bookmarks') . ' ('
+            . '`uid` INTEGER NOT NULL, `tid` INTEGER NOT NULL, `created` INTEGER NOT NULL, '
+            . 'PRIMARY KEY (`uid`, `tid`))');
+        $db->query('CREATE INDEX IF NOT EXISTS `' . $p . 'fediverse_bookmarks_tid` ON '
+            . $q('bookmarks') . ' (`tid`)');
+        $db->query('CREATE TABLE IF NOT EXISTS ' . $q('remote_actors') . ' ('
+            . '`actor_hash` char(64) PRIMARY KEY, `actor` varchar(512) NOT NULL, '
+            . '`username` varchar(128) NOT NULL, `name` varchar(255) NOT NULL, '
+            . '`avatar_url` text, `profile_url` text, `updated` INTEGER NOT NULL)');
         $db->query('CREATE INDEX IF NOT EXISTS `' . $p . 'fediverse_timeline_uid_published` ON '
             . $q('timeline') . ' (`uid`, `published`)');
         $db->query('CREATE INDEX IF NOT EXISTS `' . $p . 'fediverse_timeline_published` ON '
@@ -194,5 +283,18 @@ class Fediverse_Database
         $db->query('CREATE TABLE IF NOT EXISTS ' . $q('reply_objects') . ' ('
             . '`object_hash` char(64) PRIMARY KEY, `actor` text NOT NULL, `object_id` text NOT NULL, '
             . '`comment_id` INTEGER NOT NULL, `created` INTEGER NOT NULL)');
+        $db->query('CREATE TABLE IF NOT EXISTS ' . $q('reply_versions') . ' ('
+            . '`object_hash` char(64) PRIMARY KEY, `updated` INTEGER NOT NULL)');
+        $db->query('CREATE TABLE IF NOT EXISTS ' . $q('notifications') . ' ('
+            . '`nid` INTEGER PRIMARY KEY AUTOINCREMENT, `uid` INTEGER NOT NULL, `type` varchar(32) NOT NULL, '
+            . '`actor` text NOT NULL, `activity_hash` char(64) NOT NULL, `activity_id` text NOT NULL, `object_id` text, '
+            . '`resource_id` INTEGER NOT NULL DEFAULT 0, `read_at` INTEGER, `created` INTEGER NOT NULL, '
+            . 'UNIQUE (`uid`, `activity_hash`))');
+        $db->query('CREATE INDEX IF NOT EXISTS `' . $p . 'fediverse_notifications_uid_read_created` ON '
+            . $q('notifications') . ' (`uid`, `read_at`, `created`)');
+        $db->query('CREATE TABLE IF NOT EXISTS ' . $q('local_comments') . ' ('
+            . '`coid` INTEGER PRIMARY KEY, `uid` INTEGER NOT NULL, `object_id` varchar(512) NOT NULL, '
+            . '`in_reply_to` text NOT NULL, `to_actor` text, `deleted` INTEGER NOT NULL DEFAULT 0, '
+            . '`created` INTEGER NOT NULL, `updated` INTEGER NOT NULL)');
     }
 }

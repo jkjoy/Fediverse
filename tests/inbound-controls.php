@@ -164,12 +164,12 @@ try {
 FakePlugin::$reject = false;
 
 Typecho_Db::$db = new FakeDb();
-Typecho_Db::$db->counts = array(29, 99, 1999, 9999);
+Typecho_Db::$db->counts = array(30, 100, 2000, 10000);
 $enforce = $reflection->getMethod('enforceInboundLimits');
 $enforce->invoke(null, 'https://Social.Example./users/alice');
 assertInbound(Typecho_Db::$db->counts === array(), 'All enabled inbound limits must be checked');
 
-Typecho_Db::$db->counts = array(30);
+Typecho_Db::$db->counts = array(31);
 try {
     $enforce->invoke(null, 'https://social.example/users/alice');
     assertInbound(false, 'Actor rate limit must reject the next activity');

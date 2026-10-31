@@ -16,7 +16,7 @@ class Fediverse_Http
         for ($redirects = 0; ; $redirects++) {
             $response = self::request('GET', $currentUrl, array(
                 'Accept: ' . $accept,
-                'User-Agent: Typecho-Fediverse/0.6.2'
+                'User-Agent: Typecho-Fediverse/0.7.0'
             ));
             if (in_array($response['status'], array(301, 302, 303, 307, 308), true)) {
                 if ($redirects >= self::MAX_REDIRECTS) {
@@ -69,7 +69,7 @@ class Fediverse_Http
             $response = self::request('POST', $currentUrl, array(
                 'Accept: application/activity+json',
                 'Content-Type: application/activity+json',
-                'User-Agent: Typecho-Fediverse/0.6.2',
+                'User-Agent: Typecho-Fediverse/0.7.0',
                 'Host: ' . $host,
                 'Date: ' . $date,
                 'Digest: ' . $digest,
@@ -139,6 +139,11 @@ class Fediverse_Http
         $decoded = base64_decode($params['signature'], true);
         if ($decoded === false || openssl_verify(implode("\n", $lines), $decoded, $publicKey['publicKeyPem'], OPENSSL_ALGO_SHA256) !== 1) {
             throw new RuntimeException('HTTP signature verification failed');
+        }
+        try {
+            Fediverse_Client::cacheRemoteActor($document);
+        } catch (Throwable $e) {
+            // Profile caching is auxiliary and must not reject an otherwise valid activity.
         }
         return true;
     }

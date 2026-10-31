@@ -97,6 +97,11 @@ class Fediverse_Core
     public static function setting($name, $default = null) { return $default; }
 }
 
+class Fediverse_Notifications
+{
+    public static function prune($before) { return 0; }
+}
+
 class FakeCommentWidget
 {
     public static array $deleted = array();
@@ -154,7 +159,8 @@ checkReply($record->invoke(null, 'https://social.example/notes/one', $actor)['co
 $create = new ReflectionMethod(Fediverse_ActivityPub::class, 'createReply');
 $activity = array('object' => array(
     'id' => 'https://social.example/notes/two', 'type' => 'Note',
-    'inReplyTo' => 'https://blog.example/fediverse/post/1', 'content' => 'Duplicate'
+    'attributedTo' => $actor, 'inReplyTo' => 'https://blog.example/fediverse/post/1',
+    'content' => 'Duplicate'
 ));
 checkReply($create->invoke(null, $activity, array('uid' => 1), $actor, new stdClass()) === 0,
     'A deleted remote reply must not be recreated after pruning');

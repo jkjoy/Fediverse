@@ -173,7 +173,7 @@ class Fediverse_ActivityPub
         }
         $actor = Fediverse_Core::ensureActor($user);
         $actorUrl = Fediverse_Core::actorUrl($actor['username']);
-        return array(
+        $note = array(
             'id' => Fediverse_Core::objectUrl((int)$widget->cid),
             'type' => 'Article',
             'attributedTo' => $actorUrl,
@@ -192,6 +192,161 @@ class Fediverse_ActivityPub
             ),
             'sensitive' => false
         );
+        $metadata = self::postMetadata((int)$widget->cid, (string)$widget->content);
+        if ($metadata['summary'] !== '') {
+            $note['summary'] = $metadata['summary'];
+        }
+        if ($metadata['sensitive']) {
+            $note['sensitive'] = true;
+        }
+        if ($metadata['attachments']) {
+            $note['attachment'] = $metadata['attachments'];
+        }
+        if ($metadata['tags']) {
+            $note['tag'] = $metadata['tags'];
+        }
+        return $note;
+    }
+
+    private static function postMetadata($cid, $content)
+    {
+        $db = Typecho_Db::get();
+        $fields = array();
+        foreach ($db->fetchAll($db->select()->from('table.fields')->where('cid = ?', (int)$cid)
+            ->where('name IN ?', array('fediverse_cw', 'fediverse_sensitive'))) as $row) {
+            if (!isset($row['name'])) {
+                continue;
+            }
+            $type = (string)($row['type'] ?? 'str');
+            $field = $type . '_value';
+            $fields[(string)$row['name']] = $type === 'json'
+                ? json_decode((string)($row['str_value'] ?? ''), true)
+                : ($row[$field] ?? '');
+        }
+        $summaryValue = $fields['fediverse_cw'] ?? '';
+        $sensitiveValue = $fields['fediverse_sensitive'] ?? '';
+        $summary = Typecho_Common::subStr(
+            self::plainText(is_scalar($summaryValue) ? (string)$summaryValue : ''),
+            0,
+            500,
+            ''
+        );
+        $sensitiveValue = strtolower(trim(is_scalar($sensitiveValue) ? (string)$sensitiveValue : ''));
+
+        $attachments = array();
+        $rows = $db->fetchAll($db->select('text')->from('table.contents')
+            ->where('parent = ?', (int)$cid)->where('type = ?', 'attachment')
+            ->order('cid', Typecho_Db::SORT_ASC)->limit(8));
+        foreach ($rows as $row) {
+            $data = json_decode((string)($row['text'] ?? ''), true);
+            if (!is_array($data)) {
+                continue;
+            }
+            try {
+                $config = new Typecho_Config($data);
+                $url = (string)call_user_func(array('Widget_Upload', 'attachmentHandle'), $config);
+            } catch (Throwable $e) {
+                $url = '';
+            }
+            $url = self::httpsUrl($url);
+            if ($url === '') {
+                continue;
+            }
+            $mediaType = trim((string)($data['mime'] ?? ''));
+            $attachment = array(
+                'type' => str_starts_with(strtolower($mediaType), 'image/') ? 'Image' : 'Document',
+                'url' => $url
+            );
+            if (preg_match('#^[a-z0-9.+-]+/[a-z0-9.+-]+$#i', $mediaType)) {
+                $attachment['mediaType'] = substr($mediaType, 0, 100);
+            }
+            $description = Typecho_Common::subStr(self::plainText((string)($data['description'] ?? '')), 0, 500, '');
+            if ($description !== '') {
+                $attachment['name'] = $description;
+            }
+            $attachments[] = $attachment;
+        }
+
+        $tags = array();
+        $tagRows = $db->fetchAll($db->select('table.metas.name', 'table.metas.slug')->from('table.metas')
+            ->join('table.relationships', 'table.metas.mid = table.relationships.mid')
+            ->where('table.relationships.cid = ?', (int)$cid)->where('table.metas.type = ?', 'tag')
+            ->order('table.metas.name', Typecho_Db::SORT_ASC)->limit(32));
+        foreach ($tagRows as $row) {
+            $name = trim(self::plainText((string)($row['name'] ?? '')));
+            if ($name === '') {
+                continue;
+            }
+            $tag = array('type' => 'Hashtag', 'name' => '#' . ltrim($name, '#'));
+            try {
+                $href = Typecho_Router::url('tag', array('slug' => (string)$row['slug']), Fediverse_Core::options()->index);
+                $href = self::httpsUrl($href);
+                if ($href !== '') {
+                    $tag['href'] = $href;
+                }
+            } catch (Throwable $e) {
+                // A structured hashtag remains valid when a site has no tag route.
+            }
+            $tags[] = $tag;
+        }
+        foreach (self::linkedMentions($content) as $mention) {
+            if (count($tags) >= 64) {
+                break;
+            }
+            $tags[] = $mention;
+        }
+
+        return array(
+            'summary' => $summary,
+            'sensitive' => $summary !== '' || in_array($sensitiveValue, array('1', 'true', 'yes', 'on'), true),
+            'attachments' => $attachments,
+            'tags' => $tags
+        );
+    }
+
+    private static function linkedMentions($content)
+    {
+        if (!class_exists('DOMDocument')) {
+            preg_match_all('/<a\b[^>]*\bhref\s*=\s*(["\'])(.*?)\1[^>]*>(.*?)<\/a>/is',
+                (string)$content, $matches, PREG_SET_ORDER);
+            $mentions = array();
+            $seen = array();
+            foreach ($matches as $match) {
+                $href = self::httpsUrl(html_entity_decode((string)$match[2], ENT_QUOTES | ENT_HTML5, 'UTF-8'));
+                $name = self::plainText((string)$match[3]);
+                if ($href === '' || !preg_match('/^@[A-Za-z0-9_.-]+@[A-Za-z0-9.-]+$/', $name)
+                    || isset($seen[$href])) {
+                    continue;
+                }
+                $seen[$href] = true;
+                $mentions[] = array('type' => 'Mention', 'href' => $href, 'name' => $name);
+            }
+            return $mentions;
+        }
+        $document = new DOMDocument();
+        $previous = libxml_use_internal_errors(true);
+        try {
+            if (!$document->loadHTML('<?xml encoding="utf-8" ?><div>' . (string)$content . '</div>',
+                LIBXML_HTML_NOIMPLIED | LIBXML_HTML_NODEFDTD)) {
+                return array();
+            }
+        } finally {
+            libxml_clear_errors();
+            libxml_use_internal_errors($previous);
+        }
+        $mentions = array();
+        $seen = array();
+        foreach ($document->getElementsByTagName('a') as $link) {
+            $name = trim((string)$link->textContent);
+            $href = self::httpsUrl((string)$link->getAttribute('href'));
+            if ($href === '' || !preg_match('/^@[A-Za-z0-9_.-]+@[A-Za-z0-9.-]+$/', $name)
+                || isset($seen[$href])) {
+                continue;
+            }
+            $seen[$href] = true;
+            $mentions[] = array('type' => 'Mention', 'href' => $href, 'name' => $name);
+        }
+        return $mentions;
     }
 
     public static function outbox($user, $page = 0)
@@ -289,16 +444,28 @@ class Fediverse_ActivityPub
             throw new InvalidArgumentException('Activity and actor IDs must use HTTPS');
         }
         Fediverse_Http::verifyIncoming($request, $rawBody, $actorId);
-        if (self::activityExists($activity['id'])) {
+        $objectId = self::objectId($activity['object'] ?? null);
+        if (!self::claimActivity($activity, $actorId, $objectId)) {
             return array('duplicate' => true);
         }
-        self::enforceInboundLimits($actorId);
+        try {
+            self::recordInbound($activity['id'], $actorId);
+            self::enforceInboundLimits($actorId);
 
         $type = (string)$activity['type'];
         $user = $targetUsername !== null ? Fediverse_Core::userByUsername($targetUsername) : self::targetUser($activity);
-        $timelineUsers = in_array($type, array('Create', 'Update', 'Delete'), true)
-            ? Fediverse_Client::usersFollowing($actorId, in_array($type, array('Update', 'Delete'), true))
-            : array();
+        if (in_array($type, array('Create', 'Update', 'Delete'), true)) {
+            $timelineUsers = Fediverse_Client::usersFollowing(
+                $actorId,
+                in_array($type, array('Update', 'Delete'), true)
+            );
+        } elseif ($type === 'Announce') {
+            $timelineUsers = Fediverse_Client::usersFollowing($actorId);
+        } elseif ($type === 'Undo') {
+            $timelineUsers = Fediverse_Client::usersFollowing($actorId, true);
+        } else {
+            $timelineUsers = array();
+        }
         if (!$user && $timelineUsers) {
             $user = $timelineUsers[0];
         }
@@ -309,24 +476,53 @@ class Fediverse_ActivityPub
         foreach ($timelineUsers as $timelineUser) {
             $recipientUsers[(int)$timelineUser['uid']] = $timelineUser;
         }
+        if (in_array($type, array('Follow', 'Create', 'Update', 'Like', 'Announce'), true)) {
+            foreach ($recipientUsers as $uid => $recipientUser) {
+                if (Fediverse_Client::isSuppressed((int)$uid, $actorId)) {
+                    unset($recipientUsers[$uid]);
+                }
+            }
+            if (!$recipientUsers) {
+                self::updateActivityStatus($activity['id'], $objectId, 'ignored');
+                return array('duplicate' => false, 'status' => 'ignored');
+            }
+            $user = reset($recipientUsers);
+        }
         $status = 'accepted';
-        $objectId = self::objectId($activity['object'] ?? null);
         switch ($type) {
             case 'Follow':
                 self::follow($activity, $user, $actorId);
+                Fediverse_Notifications::add((int)$user['uid'], 'Follow', $actorId,
+                    (string)$activity['id'], $objectId);
                 break;
             case 'Accept':
                 $status = Fediverse_Client::handleFollowResponse($activity, $user, $actorId, 'accepted')
                     ? 'accepted'
                     : 'ignored';
+                if ($status === 'accepted') {
+                    Fediverse_Notifications::add((int)$user['uid'], 'Accept', $actorId,
+                        (string)$activity['id'], $objectId);
+                }
                 break;
             case 'Reject':
                 $status = Fediverse_Client::handleFollowResponse($activity, $user, $actorId, 'rejected')
                     ? 'rejected'
                     : 'ignored';
+                if ($status === 'rejected') {
+                    Fediverse_Notifications::add((int)$user['uid'], 'Reject', $actorId,
+                        (string)$activity['id'], $objectId);
+                }
                 break;
             case 'Undo':
                 self::undo($activity, $user, $actorId);
+                foreach ($recipientUsers as $recipientUser) {
+                    Fediverse_Client::undoAnnounce($objectId, $recipientUser, $actorId);
+                }
+                Fediverse_Notifications::removeActivity(
+                    (int)$user['uid'],
+                    $actorId,
+                    self::objectId($activity['object'] ?? null)
+                );
                 break;
             case 'Create':
                 $commentId = 0;
@@ -340,6 +536,10 @@ class Fediverse_ActivityPub
                     }
                 }
                 $status = $commentId ? 'comment:' . $commentId : ($timelineId ? 'timeline' : 'ignored');
+                if ($commentId) {
+                    Fediverse_Notifications::add((int)$user['uid'], 'Reply', $actorId,
+                        (string)$activity['id'], self::objectId($activity['object'] ?? null), $commentId);
+                }
                 break;
             case 'Update':
                 $commentId = 0;
@@ -356,6 +556,7 @@ class Fediverse_ActivityPub
                 break;
             case 'Delete':
                 self::deleteReply($objectId, $actorId);
+                Fediverse_Notifications::removeObject((int)$user['uid'], $actorId, $objectId);
                 $deleted = 0;
                 foreach ($recipientUsers as $recipientUser) {
                     $deleted += Fediverse_Client::deleteTimeline($objectId, $recipientUser, $actorId);
@@ -363,17 +564,38 @@ class Fediverse_ActivityPub
                 $status = $deleted ? 'timeline' : 'accepted';
                 break;
             case 'Like':
-            case 'Announce':
                 if (!self::isLocalObjectForUser($objectId, $user)) {
                     $status = 'ignored';
+                } else {
+                    Fediverse_Notifications::add((int)$user['uid'], $type, $actorId,
+                        (string)$activity['id'], $objectId);
                 }
+                break;
+            case 'Announce':
+                if (self::isLocalObjectForUser($objectId, $user)) {
+                    Fediverse_Notifications::add((int)$user['uid'], $type, $actorId,
+                        (string)$activity['id'], $objectId);
+                    break;
+                }
+                $timelineId = 0;
+                foreach ($recipientUsers as $timelineUser) {
+                    $timelineId = Fediverse_Client::storeAnnounce(
+                        $activity,
+                        $timelineUser,
+                        $actorId
+                    ) ?: $timelineId;
+                }
+                $status = $timelineId ? 'timeline' : 'ignored';
                 break;
             default:
                 $status = 'ignored';
         }
-        self::recordActivity($activity, $actorId, $objectId, $status);
-        self::recordInbound($activity['id'], $actorId);
+        self::updateActivityStatus($activity['id'], $objectId, $status);
         return array('duplicate' => false, 'status' => $status);
+        } catch (Throwable $e) {
+            self::updateActivityStatus($activity['id'], $objectId, 'rejected');
+            throw $e;
+        }
     }
 
     public static function pruneLogs($days = null)
@@ -408,6 +630,7 @@ class Fediverse_ActivityPub
             ->where('created < ?', $before)
             ->where("NOT (type IN ('Like', 'Announce') AND status IN ('accepted', 'undone'))"));
         $db->query($db->delete(Fediverse_Database::table('inbound'))->where('created < ?', $before));
+        Fediverse_Notifications::prune($before);
         return $count;
     }
 
@@ -483,24 +706,31 @@ class Fediverse_ActivityPub
         if (!self::isHttpsId($objectId) || $replyTo === '') {
             return 0;
         }
-        $attributedTo = is_array($object['attributedTo'] ?? null)
-            ? (string)($object['attributedTo']['id'] ?? '')
-            : (string)($object['attributedTo'] ?? '');
-        if ($attributedTo !== '' && rtrim($attributedTo, '/') !== rtrim($actorId, '/')) {
+        $attributedTo = self::attributedActor($object['attributedTo'] ?? null);
+        if (!self::isHttpsId($attributedTo)
+            || rtrim($attributedTo, '/') !== rtrim($actorId, '/')) {
             throw new InvalidArgumentException('Reply attribution does not match activity actor');
         }
         $existingReply = self::replyRecord($objectId, $actorId);
         if ($existingReply !== null) {
             return (int)$existingReply['comment_id'];
         }
+        $target = self::commentTargetForObject($replyTo);
         $cid = self::cidForObject($replyTo);
+        $parent = 0;
+        if (!$cid && $target) {
+            $cid = (int)$target['cid'];
+            $parent = (int)$target['coid'];
+        }
         if (!$cid) {
             return 0;
         }
         $db = Typecho_Db::get();
         $post = $db->fetchRow($db->select('cid', 'authorId', 'allowComment')->from('table.contents')
             ->where('cid = ?', $cid)->where('status = ?', 'publish')->limit(1));
-        if (!$post || (int)$post['authorId'] !== (int)$user['uid'] || !(int)$post['allowComment']) {
+        $parentOwnedByTarget = $target && (int)$target['authorId'] === (int)$user['uid'];
+        if (!$post || (!(int)$post['allowComment'])
+            || ((int)$post['authorId'] !== (int)$user['uid'] && !$parentOwnedByTarget)) {
             return 0;
         }
         $name = self::replyAuthorName($activity, $object, $actorId);
@@ -513,7 +743,7 @@ class Fediverse_ActivityPub
             'created' => isset($object['published']) ? (strtotime((string)$object['published']) ?: time()) : time(),
             'author' => Typecho_Common::subStr($name, 0, 150, ''),
             'authorId' => 0,
-            'ownerId' => (int)$user['uid'],
+            'ownerId' => (int)$post['authorId'],
             'mail' => '',
             'url' => $actorId,
             'ip' => (string)$request->getIp(),
@@ -521,11 +751,12 @@ class Fediverse_ActivityPub
             'text' => $text,
             'type' => 'comment',
             'status' => self::REMOTE_COMMENT_STATUS,
-            'parent' => 0
+            'parent' => $parent
         ), $cid);
         $comments = Typecho_Widget::widget('Widget_Abstract_Comments@fediverse_insert');
         $commentId = (int)$comments->insert($comment);
         self::rememberReply($objectId, $actorId, $commentId);
+        self::rememberReplyVersion($objectId, $actorId, self::objectVersion($object, false));
         return $commentId;
     }
 
@@ -539,15 +770,18 @@ class Fediverse_ActivityPub
             return 0;
         }
         $objectId = (string)($object['id'] ?? '');
-        $attributedTo = is_array($object['attributedTo'] ?? null)
-            ? (string)($object['attributedTo']['id'] ?? '')
-            : (string)($object['attributedTo'] ?? '');
-        if (!self::isHttpsId($objectId) || ($attributedTo !== '' && rtrim($attributedTo, '/') !== rtrim($actorId, '/'))) {
+        $attributedTo = self::attributedActor($object['attributedTo'] ?? null);
+        if (!self::isHttpsId($objectId) || !self::isHttpsId($attributedTo)
+            || rtrim($attributedTo, '/') !== rtrim($actorId, '/')) {
             return 0;
         }
         $commentId = self::commentIdForObject($objectId, $actorId);
         if (!$commentId) {
             return 0;
+        }
+        $version = self::objectVersion($object, true);
+        if ($version <= 0 || $version < self::replyVersion($objectId, $actorId)) {
+            return $commentId;
         }
         $text = self::plainText((string)($object['content'] ?? ''));
         if ($text === '') {
@@ -576,6 +810,7 @@ class Fediverse_ActivityPub
             'text' => (string)($filtered['text'] ?? ''),
             'status' => (string)($filtered['status'] ?? self::REMOTE_COMMENT_STATUS)
         ), $db->sql()->where('coid = ?', $commentId));
+        self::rememberReplyVersion($objectId, $actorId, $version);
         return $commentId;
     }
 
@@ -679,10 +914,78 @@ class Fediverse_ActivityPub
         }
     }
 
+    private static function replyVersion($objectId, $actorId)
+    {
+        $db = Typecho_Db::get();
+        $row = $db->fetchRow($db->select('updated')->from(Fediverse_Database::table('reply_versions'))
+            ->where('object_hash = ?', self::replyHash($objectId, $actorId))->limit(1));
+        return (int)($row['updated'] ?? 0);
+    }
+
+    private static function rememberReplyVersion($objectId, $actorId, $updated)
+    {
+        if ((int)$updated <= 0) {
+            return;
+        }
+        $db = Typecho_Db::get();
+        $table = Fediverse_Database::table('reply_versions');
+        $hash = self::replyHash($objectId, $actorId);
+        $existing = $db->fetchRow($db->select('object_hash')->from($table)
+            ->where('object_hash = ?', $hash)->limit(1));
+        if ($existing) {
+            $db->query($db->update($table)->rows(array('updated' => (int)$updated))
+                ->where('object_hash = ?', $hash));
+        } else {
+            $db->query($db->insert($table)->rows(array(
+                'object_hash' => $hash,
+                'updated' => (int)$updated
+            )));
+        }
+    }
+
+    private static function objectVersion($object, $requireUpdated)
+    {
+        $values = $requireUpdated
+            ? array($object['updated'] ?? null)
+            : array($object['updated'] ?? null, $object['published'] ?? null);
+        foreach ($values as $value) {
+            if (!is_string($value) || trim($value) === '') {
+                continue;
+            }
+            $timestamp = strtotime($value);
+            if ($timestamp !== false && $timestamp > 0) {
+                return $timestamp;
+            }
+        }
+        return 0;
+    }
+
     private static function commentIdForObject($objectId, $actorId)
     {
         $record = self::replyRecord($objectId, $actorId);
         return $record === null ? 0 : (int)$record['comment_id'];
+    }
+
+    private static function commentTargetForObject($objectId)
+    {
+        if ((string)$objectId === '') {
+            return null;
+        }
+        $db = Typecho_Db::get();
+        $mapping = $db->fetchRow($db->select('comment_id')->from(Fediverse_Database::table('reply_objects'))
+            ->where('object_id = ?', (string)$objectId)->limit(1));
+        if (!$mapping) {
+            $local = $db->fetchRow($db->select('coid')
+                ->from(Fediverse_Database::table('local_comments'))
+                ->where('object_id = ?', (string)$objectId)->where('deleted = ?', 0)->limit(1));
+            $mapping = $local ? array('comment_id' => (int)$local['coid']) : null;
+        }
+        $commentId = (int)($mapping['comment_id'] ?? 0);
+        if ($commentId <= 0) {
+            return null;
+        }
+        return $db->fetchRow($db->select('coid', 'cid', 'authorId')->from('table.comments')
+            ->where('coid = ?', $commentId)->limit(1)) ?: null;
     }
 
     private static function replyAuthorName($activity, $object, $actorId)
@@ -730,7 +1033,10 @@ class Fediverse_ActivityPub
     {
         $cid = self::cidForObject($objectId);
         if (!$cid) {
-            return false;
+            $db = Typecho_Db::get();
+            return (bool)$db->fetchRow($db->select('coid')->from(Fediverse_Database::table('local_comments'))
+                ->where('object_id = ?', (string)$objectId)->where('uid = ?', (int)$user['uid'])
+                ->where('deleted = ?', 0)->limit(1));
         }
         $db = Typecho_Db::get();
         $post = $db->fetchRow($db->select('authorId')->from('table.contents')
@@ -791,6 +1097,13 @@ class Fediverse_ActivityPub
                     return Fediverse_Core::userById((int)$post['authorId']);
                 }
             }
+            $db = Typecho_Db::get();
+            $localComment = $db->fetchRow($db->select('uid')
+                ->from(Fediverse_Database::table('local_comments'))
+                ->where('object_id = ?', (string)$target)->where('deleted = ?', 0)->limit(1));
+            if ($localComment) {
+                return Fediverse_Core::userById((int)$localComment['uid']);
+            }
         }
         $cid = self::cidForObject(is_array($activityObject) ? (string)($activityObject['inReplyTo'] ?? '') : '');
         if ($cid) {
@@ -827,7 +1140,7 @@ class Fediverse_ActivityPub
         );
         foreach ($checks as $check) {
             $limit = self::inboundLimit($check[2], $check[3]);
-            if ($limit > 0 && self::inboundCount($check[0], $check[1], $check[4]) >= $limit) {
+            if ($limit > 0 && self::inboundCount($check[0], $check[1], $check[4]) > $limit) {
                 throw new Fediverse_InboundLimitException($check[5]);
             }
         }
@@ -880,24 +1193,63 @@ class Fediverse_ActivityPub
             ->where('activity_hash = ?', hash('sha256', (string)$id))->limit(1));
     }
 
-    private static function recordActivity($activity, $actor, $objectId, $status)
+    private static function claimActivity($activity, $actor, $objectId)
     {
         $db = Typecho_Db::get();
-        $db->query($db->insert(Fediverse_Database::table('activities'))->rows(array(
-            'activity_hash' => hash('sha256', (string)$activity['id']),
-            'activity_id' => (string)$activity['id'],
-            'type' => substr((string)$activity['type'], 0, 32),
-            'actor' => $actor,
+        try {
+            $db->query($db->insert(Fediverse_Database::table('activities'))->rows(array(
+                'activity_hash' => hash('sha256', (string)$activity['id']),
+                'activity_id' => (string)$activity['id'],
+                'type' => substr((string)$activity['type'], 0, 32),
+                'actor' => $actor,
+                'object_id' => $objectId ?: null,
+                'payload' => Fediverse_Core::json($activity),
+                'status' => 'processing',
+                'created' => time()
+            )));
+            return true;
+        } catch (Throwable $e) {
+            if (self::activityExists($activity['id'])) {
+                return false;
+            }
+            throw $e;
+        }
+    }
+
+    private static function updateActivityStatus($activityId, $objectId, $status)
+    {
+        $db = Typecho_Db::get();
+        $db->query($db->update(Fediverse_Database::table('activities'))->rows(array(
             'object_id' => $objectId ?: null,
-            'payload' => Fediverse_Core::json($activity),
-            'status' => substr((string)$status, 0, 16),
-            'created' => time()
-        )));
+            'status' => substr((string)$status, 0, 16)
+        ))->where('activity_hash = ?', hash('sha256', (string)$activityId)));
     }
 
     private static function objectId($object)
     {
         return is_array($object) ? (string)($object['id'] ?? '') : (is_string($object) ? $object : '');
+    }
+
+    private static function attributedActor($value)
+    {
+        if (is_string($value)) {
+            return trim($value);
+        }
+        if (!is_array($value)) {
+            return '';
+        }
+        if (isset($value['id'])) {
+            return is_string($value['id']) ? trim($value['id']) : '';
+        }
+        $actors = array();
+        foreach ($value as $candidate) {
+            $actor = self::attributedActor($candidate);
+            if ($actor === '') {
+                return '';
+            }
+            $actors[rtrim($actor, '/')] = $actor;
+        }
+        return count($actors) === 1 ? (string)reset($actors) : '';
     }
 
     private static function isHttpsId($id)
