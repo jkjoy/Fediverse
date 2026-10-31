@@ -230,27 +230,30 @@ html{-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
                     <?php
                     $httpsReady = strtolower((string)parse_url((string)$options->siteUrl, PHP_URL_SCHEME)) === 'https';
                     $domainReady = Fediverse_Core::hasDomain();
+                    $autoDelivery = (string)Fediverse_Core::setting('autoDelivery', '1') === '1';
+                    $autoDeliveryBatch = max(1, min(10, (int)Fediverse_Core::setting('autoDeliveryBatch', 1)));
                     $cronToken = (string)Fediverse_Core::setting('cronToken', '');
                     ?>
                     <div class="fed-endpoints">
                         <div class="fed-endpoint"><strong><?php _e('HTTPS'); ?></strong><span><span class="fed-state <?php echo $httpsReady ? '' : 'error'; ?>"><?php echo $httpsReady ? _t('正常') : _t('未启用'); ?></span></span></div>
                         <div class="fed-endpoint"><strong><?php _e('联邦域名'); ?></strong><span><span class="fed-state <?php echo $domainReady ? '' : 'error'; ?>"><?php echo $domainReady ? $e(Fediverse_Core::domain()) : _t('未设置，请先打开插件设置'); ?></span></span></div>
+                        <div class="fed-endpoint"><strong><?php _e('自动投递'); ?></strong><span><span class="fed-state <?php echo $autoDelivery ? '' : 'warn'; ?>"><?php echo $autoDelivery ? $e(_t('已开启，每次最多 %d 条', $autoDeliveryBatch)) : _t('已关闭，依赖 Cron 或手动处理'); ?></span></span></div>
                         <?php $sharedInbox = $domainReady ? Fediverse_Core::url('fediverse/inbox') : ''; ?>
                         <?php $webfingerUrl = $domainReady ? Fediverse_Core::origin() . '/.well-known/webfinger' : ''; ?>
                         <?php $cronUrl = $domainReady && $cronToken !== '' ? Fediverse_Core::url('fediverse/cron/' . $cronToken) : ''; ?>
                         <div class="fed-endpoint"><strong><?php _e('共享收件箱'); ?></strong><span class="fed-value"><code><?php echo $sharedInbox !== '' ? $e($sharedInbox) : _t('配置联邦域名后生成'); ?></code><?php if ($sharedInbox !== ''): ?><button class="fed-copy" type="button" data-copy="<?php echo $e($sharedInbox); ?>"><?php _e('复制'); ?></button><?php endif; ?></span></div>
                         <div class="fed-endpoint"><strong><?php _e('WebFinger'); ?></strong><span class="fed-value"><code><?php echo $webfingerUrl !== '' ? $e($webfingerUrl) : _t('配置联邦域名后生成'); ?></code><?php if ($webfingerUrl !== ''): ?><button class="fed-copy" type="button" data-copy="<?php echo $e($webfingerUrl); ?>"><?php _e('复制'); ?></button><?php endif; ?></span></div>
-                        <div class="fed-endpoint"><strong><?php _e('Cron'); ?></strong><span class="fed-value"><code><?php echo $cronUrl !== '' ? $e($cronUrl) : (!$domainReady ? _t('请先设置联邦域名') : _t('尚未保存令牌')); ?></code><?php if ($cronUrl !== ''): ?><button class="fed-copy" type="button" data-copy="<?php echo $e($cronUrl); ?>"><?php _e('复制'); ?></button><?php endif; ?></span></div>
+                        <div class="fed-endpoint"><strong><?php _e('Cron（可选）'); ?></strong><span class="fed-value"><code><?php echo $cronUrl !== '' ? $e($cronUrl) : (!$domainReady ? _t('请先设置联邦域名') : ($autoDelivery ? _t('自动投递已开启，可不配置') : _t('尚未保存令牌'))); ?></code><?php if ($cronUrl !== ''): ?><button class="fed-copy" type="button" data-copy="<?php echo $e($cronUrl); ?>"><?php _e('复制'); ?></button><?php endif; ?></span></div>
                     </div>
 
                     <details class="fed-cron-help">
                         <summary><?php _e('如何设置定时任务'); ?></summary>
                         <div class="fed-cron-help__body">
                             <?php if ($cronUrl === ''): ?>
-                                <p><?php echo !$domainReady ? _t('请先打开插件设置并保存联邦域名，然后返回此页查看完整任务地址和命令。') : _t('请先打开插件设置并保存 Cron 令牌，然后返回此页查看完整任务地址和命令。'); ?></p>
+                                <p><?php echo !$domainReady ? _t('请先打开插件设置并保存联邦域名，然后返回此页查看完整任务地址和命令。') : ($autoDelivery ? _t('自动投递已开启，日常交互无需 Cron。低流量站点如需无人访问时自动重试和清理，可在插件设置中保存 Cron 令牌。') : _t('自动投递已关闭，请先在插件设置中保存 Cron 令牌，然后返回此页配置任务。')); ?></p>
                             <?php else: ?>
                                 <?php $cronCommand = 'curl -fsS --max-time 50 "' . str_replace(array('\\', '"', '$', '`'), array('\\\\', '\\"', '\\$', '\\`'), $cronUrl) . '" >/dev/null 2>&1'; ?>
-                                <p><?php _e('建议每分钟访问一次 Cron 地址。任务会发送投递队列、安排失败重试并清理过期数据。'); ?></p>
+                                <p><?php echo $autoDelivery ? _t('自动投递已开启，Cron 是可选保障：它会在网站没有新交互时继续重试，并清理过期数据。建议每分钟访问一次。') : _t('自动投递已关闭，必须由 Cron 或后台手动处理队列。建议每分钟访问一次 Cron 地址。'); ?></p>
 
                                 <h3><?php _e('宝塔面板'); ?></h3>
                                 <ol>

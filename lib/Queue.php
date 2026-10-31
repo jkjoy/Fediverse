@@ -6,6 +6,8 @@ if (!defined('__TYPECHO_ROOT_DIR__')) {
 
 class Fediverse_Queue
 {
+    private static $dispatchScheduled = false;
+
     public static function enqueuePost($cid, $operation)
     {
         $cid = (int)$cid;
@@ -134,6 +136,38 @@ class Fediverse_Queue
             'created' => $now,
             'updated' => $now
         )));
+        self::scheduleAutoDispatch();
+    }
+
+    public static function scheduleAutoDispatch()
+    {
+        if (self::$dispatchScheduled || !Fediverse_Core::isEnabled()
+            || (string)Fediverse_Core::setting('autoDelivery', '1') !== '1') {
+            return false;
+        }
+        self::$dispatchScheduled = true;
+        register_shutdown_function(static function () {
+            if (function_exists('fastcgi_finish_request')) {
+                @fastcgi_finish_request();
+            }
+            self::dispatch();
+        });
+        return true;
+    }
+
+    public static function dispatch($limit = null)
+    {
+        $result = array('processed' => 0, 'sent' => 0, 'failed' => 0);
+        if (!Fediverse_Core::isEnabled() || (string)Fediverse_Core::setting('autoDelivery', '1') !== '1') {
+            return $result;
+        }
+        $limit = $limit === null ? (int)Fediverse_Core::setting('autoDeliveryBatch', 1) : (int)$limit;
+        try {
+            return self::run(max(1, min(10, $limit)));
+        } catch (Throwable $e) {
+            error_log('[Fediverse] Automatic queue delivery failed: ' . $e->getMessage());
+            return $result;
+        }
     }
 
     public static function run($limit = null)

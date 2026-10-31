@@ -13,7 +13,7 @@ require_once __DIR__ . '/AdminAction.php';
  *
  * @package Fediverse
  * @author Typecho Community
- * @version 0.6.2
+ * @version 0.6.3
  * @link https://www.w3.org/TR/activitypub/
  */
 class Fediverse_Plugin implements Typecho_Plugin_Interface
@@ -68,7 +68,7 @@ class Fediverse_Plugin implements Typecho_Plugin_Interface
         Typecho_Plugin::factory('Widget_Contents_Post_Edit')->finishMark = array(__CLASS__, 'markPost');
         Typecho_Plugin::factory('Widget_Contents_Post_Edit')->finishDelete = array(__CLASS__, 'deletePost');
 
-        return _t('Fediverse 已启用。首次使用必须在插件设置中填写并保存联邦域名，然后配置队列 Cron。');
+        return _t('Fediverse 已启用。首次使用必须填写联邦域名；自动投递默认启用，Cron 可作为低流量站点的重试保障。');
     }
 
     public static function deactivate()
@@ -204,11 +204,30 @@ class Fediverse_Plugin implements Typecho_Plugin_Interface
             $form->addInput($input);
         }
 
+        $autoDelivery = new Typecho_Widget_Helper_Form_Element_Radio(
+            'autoDelivery',
+            array('1' => _t('交互后自动投递（推荐）'), '0' => _t('仅使用队列 Cron 或后台手动处理')),
+            '1',
+            _t('自动投递'),
+            _t('发布、关注、回复、点赞或收到远端活动后，在请求结束时自动处理少量队列。失败任务会保留并在后续交互时重试。')
+        );
+        $form->addInput($autoDelivery);
+
+        $autoBatch = new Typecho_Widget_Helper_Form_Element_Text(
+            'autoDeliveryBatch',
+            null,
+            '1',
+            _t('每次自动投递数量'),
+            _t('每次交互后最多处理 1 至 10 个到期任务。远端响应较慢时建议保持为 1，避免请求结束后的后台处理时间过长。')
+        );
+        $autoBatch->addRule('regexp', _t('必须是 1 至 10 的整数'), '/^(?:[1-9]|10)$/');
+        $form->addInput($autoBatch);
+
         $batch = new Typecho_Widget_Helper_Form_Element_Text(
             'queueBatch',
             null,
             '20',
-            _t('每次队列处理数量')
+            _t('Cron 每次处理数量')
         );
         $batch->addRule('isInteger', _t('必须是整数'));
         $form->addInput($batch);
